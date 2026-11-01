@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>askee</title>
+<style>
+  /* Every colour is a role variable set from the active theme (/api/meta), so the eight
+     themes swap in one place and match the terminal deck exactly. */
+  :root { --surface:#0b0e14; --panel:#10141b; --border:#2b313c; --grid:#1d222b; --text:#d0d0d0;
+          --dim:#8a8f98; --title:#5fd7ff; --accent:#ffaf00; --gap:8px; --tileh:300px; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--surface); color:var(--text);
+              font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; padding:8px 10px;
+           border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--surface); z-index:2; }
+  .brand { color:var(--title); font-weight:700; }
+  nav, .ranges { display:flex; flex-wrap:wrap; gap:4px; }
+  button { background:none; border:1px solid var(--border); color:var(--dim); font:inherit;
+           padding:3px 9px; border-radius:3px; cursor:pointer; }
+  button.on { color:var(--accent); border-color:var(--accent); font-weight:700; }
+  button:hover { color:var(--text); }
+  select { background:var(--panel); color:var(--text); border:1px solid var(--border); font:inherit; padding:3px 6px; border-radius:3px; }
+  .stamp { margin-left:auto; color:var(--dim); }
+  main { display:grid; gap:var(--gap); padding:var(--gap); grid-template-columns:repeat(var(--cols,2), minmax(0,1fr)); }
+  .tile { background:var(--panel); border:1px solid var(--border); border-radius:4px; height:var(--tileh);
+          display:flex; flex-direction:column; min-width:0; position:relative; }
+  .tile h2 { margin:0; padding:6px 10px 0; font-size:13px; color:var(--title); font-weight:700;
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tile h2 small { color:var(--dim); font-weight:400; margin-left:6px; }
+  .tile .sub { padding:0 10px; color:var(--dim); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:15px; }
+  .legend { padding:2px 10px 0; display:flex; flex-wrap:wrap; gap:2px 12px; font-size:12px; min-height:16px; }
+  .legend i { display:inline-block; width:9px; height:9px; margin-right:4px; border-radius:2px; vertical-align:-1px; }
+  .body { flex:1; min-height:0; position:relative; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  pre { margin:0; padding:4px 10px; overflow:auto; height:100%; color:var(--text); }
+  .foot { padding:2px 10px 6px; color:var(--dim); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .err { color:var(--accent); padding:10px; }
+  .tip { position:absolute; pointer-events:none; background:var(--surface); border:1px solid var(--border);
+         padding:4px 7px; font-size:12px; display:none; z-index:3; white-space:nowrap; }
+  .tnote { color:var(--dim); font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand" id="brand">askee</div>
+  <nav id="groups"></nav>
+  <div class="ranges" id="ranges"></div>
+  <select id="themes" title="theme (t cycles)"></select>
+  <div class="stamp" id="stamp"></div>
+</header>
+<main id="grid"></main>
+<script>
+"use strict";
+let META = null, TH = null, PAL = [], SEQ = [], cur = 0, range = "24h", data = null, timer = null;
+const $ = id => document.getElementById(id);
+
+function fmt(v) {
+  const a = Math.abs(v);
+  if (a >= 1e6) return (v/1e6).toFixed(2) + "M";
+  if (a >= 1e4) return (v/1e3).toFixed(1) + "k";
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 10) return v.toFixed(1);
+  return v.toFixed(2);
+}
+function tfmt(t, span) {
+  const d = new Date(t * 1000);
+  if (span > 36*3600) return d.toLocaleDateString(undefined, {day:"2-digit", month:"short"});
+  return d.toLocaleTimeString(undefined, {hour:"2-digit", minute:"2-digit", hour12:false});
+}
+// colour helpers — the same maths as the Go side (themes.go)
+const hx = h => [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
+const toHex = c => "#" + c.map(x => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, "0")).join("");
+const mixc = (a, b, t) => toHex(hx(a).map((x, i) => x + (hx(b)[i] - x) * t));
+function ramp(stops, t) {
+  t = Math.max(0, Math.min(1, t)); const f = t * (stops.length - 1), i = Math.min(Math.floor(f), stops.length - 2);
+  return mixc(stops[i], stops[i+1], f - i);
+}
+const alpha = (h, a) => { const c = hx(h); return `rgba(${c[0]},${c[1]},${c[2]},${a})`; };
+// temperature colour from the ACTIVE theme: smooth ramp, six hard steps (flat), or ink (mono)
+function thermalAt(v) {
+  const st = TH.thermal; if (!st || !st.length) return PAL[0];
+  const f = (v - META.thermal_range[0]) / (META.thermal_range[1] - META.thermal_range[0]);
+  if (TH.style === "flat") return st[Math.max(0, Math.min(st.length - 1, Math.floor(f * st.length)))];
+  return ramp(st, f);
+}
+const dashOf = i => (TH.mono || TH.dashed) ? META.dashes[i % META.dashes.length] : [];
+// a hatch pattern for mono fills: ink lines on the panel, angle and spacing vary by band
+function hatch(c, ink, i) {
+  const p = document.createElement("canvas"); p.width = p.height = 8;
+  const g = p.getContext("2d"); g.strokeStyle = alpha(ink, .55); g.lineWidth = 1;
+  g.beginPath();
+  if (i % 3 === 0) { g.moveTo(0, 8); g.lineTo(8, 0); }
+  else if (i % 3 === 1) { g.moveTo(0, 0); g.lineTo(8, 8); }
+  else { g.moveTo(0, 4); g.lineTo(8, 4); }
+  g.stroke(); return c.createPattern(p, "repeat");
+}
+function swatch(i, col) {
+  if (!TH.mono && !TH.dashed) { const sw = document.createElement("i"); sw.style.background = col; return sw; }
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", "22"); svg.setAttribute("height", "8"); svg.style.marginRight = "4px";
+  const l = document.createElementNS(ns, "line");
+  Object.entries({x1: 0, y1: 4, x2: 22, y2: 4, stroke: col, "stroke-width": 2, "stroke-dasharray": dashOf(i).join(" ")}).forEach(([k, v]) => l.setAttribute(k, v));
+  svg.append(l); return svg;
+}
+
+function applyTheme(id) {
+  TH = META.themes.find(t => t.id === id) || META.themes[0];
+  const names = ["surface","panel","border","grid","text","dim","title","accent"];
+  names.forEach((n, i) => document.documentElement.style.setProperty("--" + n, TH.vars[i]));
+  PAL = TH.palette; SEQ = TH.seq;
+  localStorage.setItem("askee-theme", TH.id);
+  buttons(); render();
+}
+
+// ── layout: fill the screen. Wide = cols × rows of the viewport; narrow = scroll ──────
+function layout(n) {
+  const w = innerWidth, h = innerHeight - document.querySelector("header").offsetHeight;
+  let cols = w >= 1700 ? (n > 4 ? 3 : 2) : w >= 820 ? 2 : 1;
+  if (n === 1) cols = 1;
+  const rows = Math.ceil(n / cols), gap = 8;
+  const th = cols === 1 && w < 820 ? Math.max(270, Math.round(innerHeight * 0.46))
+                                   : Math.max(230, Math.floor((h - gap*(rows+1)) / rows));
+  document.documentElement.style.setProperty("--cols", cols);
+  document.documentElement.style.setProperty("--tileh", th + "px");
+}
+
+function setup(cv) {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.round(r.width*dpr)); cv.height = Math.max(1, Math.round(r.height*dpr));
+  const c = cv.getContext("2d"); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.font = "11px ui-monospace,Menlo,Consolas,monospace"; c.textBaseline = "middle";
+  return [c, r.width, r.height];
+}
+
+function stacked(series) {
+  const acc = new Map();
+  return series.map(s => ({name: s.name, t: s.t, v: s.v.map((v, k) => { const x = (acc.get(s.t[k]) || 0) + v; acc.set(s.t[k], x); return x; })}));
+}
+
+function drawLine(cv, t) {
+  const [c, W, H] = setup(cv);
+  const L = 48, R = 12, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
+  const S = t.stack ? stacked(t.series || []) : (t.series || []);
+  let lo = Infinity, hi = -Infinity;
+  for (const s of S) for (const v of s.v) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  for (const r of t.refs || []) { lo = Math.min(lo, r.value); hi = Math.max(hi, r.value); }
+  if (!isFinite(lo)) { c.fillStyle = TH.vars[5]; c.fillText("no data in this range", L + 8, T + ph/2); return null; }
+  if (t.ymin != null) lo = Math.min(lo, t.ymin); else { const p = (hi - lo)*0.1 || Math.max(1, Math.abs(hi)*0.1); lo -= p; }
+  if (t.ymax != null) { hi = Math.max(hi, t.ymax); if (t.ymax === 100) hi = Math.min(hi, 100); } else hi += (hi - lo)*0.1;
+  if (hi <= lo) hi = lo + 1;
+  const X = ts => L + (ts - t.start) / (t.end - t.start) * pw, Y = v => T + (1 - (v - lo)/(hi - lo)) * ph;
+  // recessive grid: faint rules, dim labels
+  c.strokeStyle = TH.vars[3]; c.lineWidth = 1; c.fillStyle = TH.vars[5]; c.textAlign = "right";
+  const ticks = ph > 160 ? 4 : 2;
+  for (let i = 0; i <= ticks; i++) {
+    const v = lo + (hi - lo)*i/ticks, y = Math.round(Y(v)) + .5;
+    c.beginPath(); c.moveTo(L, y); c.lineTo(L + pw, y); c.stroke(); c.fillText(fmt(v), L - 6, y);
+  }
+  const xt = pw > 520 ? 6 : pw > 280 ? 4 : 2;
+  for (let i = 0; i <= xt; i++) {
+    const ts = t.start + (t.end - t.start)*i/xt;
+    c.textAlign = i === 0 ? "left" : i === xt ? "right" : "center";
+    c.fillText(tfmt(ts, t.end - t.start), X(ts), T + ph + 11);
+  }
+  // reference lines: "compared to what" — dashed, recessive, labelled
+  c.save(); c.setLineDash([4, 4]); c.lineWidth = 1;
+  for (const r of t.refs || []) {
+    const y = Math.round(Y(r.value)) + .5;
+    c.strokeStyle = TH.vars[5]; c.beginPath(); c.moveTo(L, y); c.lineTo(L + pw, y); c.stroke();
+    c.fillStyle = TH.vars[5]; c.textAlign = "right"; c.fillText(`${r.label} ${fmt(r.value)}${t.unit || ""}`, L + pw - 2, y - 7);
+  }
+  c.restore();
+  const gap = 3 * (t.step || 60);
+  const path = (s, close) => {
+    c.beginPath(); let pen = false, last = 0, first = null, prevX = 0;
+    for (let k = 0; k < s.t.length; k++) {
+      const x = X(s.t[k]), y = Y(s.v[k]);
+      if (pen && s.t[k] - last <= gap) c.lineTo(x, y); else { if (close && first !== null) { c.lineTo(prevX, T + ph); c.lineTo(first, T + ph); } c.moveTo(x, y); first = x; }
+      pen = true; last = s.t[k]; prevX = x;
+    }
+    if (close && first !== null) { c.lineTo(prevX, T + ph); c.lineTo(first, T + ph); c.closePath(); }
+  };
+  if (t.stack) {
+    // parts of a whole: filled bands, top series drawn first so lower bands sit on top
+    for (let i = S.length - 1; i >= 0; i--) {
+      const s = S[i], col = PAL[i % PAL.length];
+      if (TH.mono) { c.fillStyle = alpha(col, .10 + .08 * (i % 3)); path(s, true); c.fill(); c.fillStyle = hatch(c, col, i); }
+      else if (TH.style === "smooth") { const g = c.createLinearGradient(0, T, 0, T + ph); g.addColorStop(0, alpha(col, .75)); g.addColorStop(1, alpha(col, .45)); c.fillStyle = g; }
+      else c.fillStyle = alpha(col, .62);
+      path(s, true); c.fill();
+      c.strokeStyle = TH.vars[1]; c.lineWidth = 1; path(s, false); c.stroke();
+    }
+  } else {
+    S.forEach((s, i) => {
+      const col = PAL[i % PAL.length];
+      if (TH.style === "smooth" && S.length <= 2 && s.v.length) {   // soft gradient wash: smooth themes only
+        const g = c.createLinearGradient(0, T, 0, T + ph);
+        if (t.thermal && !TH.mono) { [0, .5, 1].forEach(f => g.addColorStop(f, alpha(thermalAt(hi - (hi - lo)*f), .22 - .18*f))); }
+        else { g.addColorStop(0, alpha(col, .30)); g.addColorStop(1, alpha(col, 0)); }
+        c.fillStyle = g; path(s, true); c.fill();
+      }
+      c.lineWidth = TH.mono ? 1.6 : 2; c.lineJoin = "round"; c.setLineDash(dashOf(i));
+      if (t.thermal && !TH.mono) {      // the line itself carries temperature: each segment coloured by value
+        for (let k = 1; k < s.t.length; k++) {
+          if (s.t[k] - s.t[k-1] > gap) continue;
+          c.strokeStyle = thermalAt((s.v[k] + s.v[k-1]) / 2);
+          c.beginPath(); c.moveTo(X(s.t[k-1]), Y(s.v[k-1])); c.lineTo(X(s.t[k]), Y(s.v[k])); c.stroke();
+        }
+      } else { c.strokeStyle = col; path(s, false); c.stroke(); }
+      c.setLineDash([]);
+    });
+  }
+  return {X, Y, L, pw, T, ph, S};
+}
+
+function drawBars(cv, t) {
+  const [c, W, H] = setup(cv);
+  let bars = t.bars || [];
+  if (!bars.length) { c.fillStyle = TH.vars[5]; c.fillText("no data", 10, 14); return null; }
+  const rowH = Math.max(8, Math.min(26, (H - 6) / bars.length)), fit = Math.floor((H - 6) / rowH);  // shrink before dropping rows: an hour-of-day chart needs all 24
+  c.font = (rowH < 12 ? "9px" : "11px") + " ui-monospace,Menlo,Consolas,monospace";
+  if (bars.length > fit) bars = bars.slice(bars.length - fit);
+  const lw = Math.min(W*0.42, Math.max(...bars.map(b => c.measureText(b.label).width)) + 12);
+  const max = Math.max(...bars.map(b => b.value), t.unit === "%" ? 100 : 0) || 1, vw = 76, bw = W - lw - vw - 14;  // % is drawn against 100
+  const geo = [];
+  bars.forEach((b, i) => {
+    const y = 3 + i*rowH + rowH/2, f = b.value / max, len = Math.max(2, f*bw), bh = rowH*0.62;
+    c.fillStyle = TH.vars[4]; c.textAlign = "right"; c.fillText(b.label, lw, y);
+    // magnitude gradient: the bar's own end colour is its value on the theme's one-hue ramp
+    if (TH.style === "smooth") {
+      const g = c.createLinearGradient(lw + 6, 0, lw + 6 + bw, 0);
+      g.addColorStop(0, SEQ[0]); g.addColorStop(1, SEQ[SEQ.length - 1]); c.fillStyle = g;
+    } else c.fillStyle = TH.mono ? alpha(PAL[0], .85) : PAL[0];
+    c.beginPath();
+    if (c.roundRect) c.roundRect(lw + 6, y - bh/2, len, bh, [0, 4, 4, 0]); else c.rect(lw + 6, y - bh/2, len, bh);
+    c.fill();
+    c.fillStyle = TH.vars[4]; c.textAlign = "left"; c.fillText(fmt(b.value) + " " + (t.unit || ""), lw + 12 + len, y);
+    geo.push({y0: y - rowH/2, y1: y + rowH/2, b});
+  });
+  return geo;
+}
+
+function stats(s, unit) {
+  let mn = Infinity, mx = -Infinity, sum = 0;
+  for (const v of s.v) { mn = Math.min(mn, v); mx = Math.max(mx, v); sum += v; }
+  return `${s.name}: min ${fmt(mn)} · max ${fmt(mx)} · mean ${fmt(sum/s.v.length)} ${unit || ""}`;
+}
+
+function render() {
+  if (!data || !TH) return;
+  const grid = $("grid");
+  layout(data.tiles.length);
+  grid.innerHTML = "";
+  for (const t of data.tiles) {
+    const el = document.createElement("section"); el.className = "tile";
+    el.innerHTML = `<h2></h2><div class="sub"></div><div class="legend"></div><div class="body"></div><div class="foot"></div><div class="tip"></div>`;
+    const h2 = el.querySelector("h2"); h2.textContent = t.title;
+    const sm = document.createElement("small"); sm.textContent = t.fixed || data.range; h2.append(sm);
+    el.querySelector(".sub").textContent = t.subtitle || "";
+    grid.appendChild(el);
+    const body = el.querySelector(".body"), foot = el.querySelector(".foot"), leg = el.querySelector(".legend");
+    if (t.err) { body.innerHTML = `<div class="err"></div>`; body.firstChild.textContent = "error: " + t.err; continue; }
+    if (t.kind === "line") {
+      (t.series || []).forEach((s, i) => {
+        if (!s.v.length || (t.series.length === 1)) return;   // one series: the title names it
+        const sp = document.createElement("span");
+        const col = t.thermal && !TH.mono ? thermalAt(s.v[s.v.length-1]) : PAL[i % PAL.length];
+        sp.append(swatch(i, col), `${s.name} ${fmt(s.v[s.v.length-1])}${t.unit || ""}`); leg.append(sp);
+      });
+      if (t.series && t.series.length === 1 && t.series[0].v.length) {
+        const s = t.series[0]; leg.textContent = `latest ${fmt(s.v[s.v.length-1])}${t.unit || ""}`;
+      }
+      const cv = document.createElement("canvas"); body.append(cv);
+      const geo = drawLine(cv, t);
+      if (t.series && t.series[0] && t.series[0].v.length) foot.textContent = stats(t.series[0], t.unit);
+      if (geo) hoverLine(el, cv, t, geo);
+    } else if (t.kind === "bars") {
+      const cv = document.createElement("canvas"); body.append(cv);
+      const geo = drawBars(cv, t);
+      foot.textContent = t.note || "";
+      if (geo) hoverBars(el, cv, t, geo);
+    } else {
+      const pre = document.createElement("pre"); pre.textContent = (t.lines || []).join("\n"); body.append(pre);
+      const longest = Math.max(1, ...(t.lines || []).map(l => [...l].length));
+      pre.style.fontSize = Math.max(8, Math.min(13, (body.clientWidth - 20) / (longest * 0.62))) + "px";
+      foot.textContent = t.note || "";
+    }
+  }
+  $("stamp").textContent = "updated " + new Date(data.generated*1000).toLocaleTimeString(undefined, {hour12:false});
+}
+
+function tipAt(el, tip, e, cv, html) {
+  const r = cv.getBoundingClientRect();
+  tip.innerHTML = html; tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX - el.getBoundingClientRect().left + 14, el.clientWidth - tip.offsetWidth - 4) + "px";
+  tip.style.top = (e.clientY - el.getBoundingClientRect().top + 12) + "px";
+}
+function hoverLine(el, cv, t, g) {
+  const tip = el.querySelector(".tip");
+  cv.addEventListener("mousemove", e => {
+    const x = e.clientX - cv.getBoundingClientRect().left;
+    if (x < g.L || x > g.L + g.pw) { tip.style.display = "none"; return; }
+    const ts = t.start + (x - g.L) / g.pw * (t.end - t.start);
+    const rows = (t.series || []).map((s, i) => {
+      let k = 0, best = Infinity;
+      for (let j = 0; j < s.t.length; j++) { const d = Math.abs(s.t[j] - ts); if (d < best) { best = d; k = j; } }
+      const col = t.thermal ? thermalAt(s.v[k]) : PAL[i % PAL.length];
+      return s.v.length ? `<span style="color:${col}">■</span> ${s.name} ${fmt(s.v[k])}${t.unit || ""}` : "";
+    }).filter(Boolean);
+    tipAt(el, tip, e, cv, `<div class="tnote">${new Date(ts*1000).toLocaleString(undefined, {hour12:false})}</div>` + rows.join("<br>"));
+  });
+  cv.addEventListener("mouseleave", () => tip.style.display = "none");
+}
+function hoverBars(el, cv, t, geo) {
+  const tip = el.querySelector(".tip");
+  cv.addEventListener("mousemove", e => {
+    const y = e.clientY - cv.getBoundingClientRect().top, hit = geo.find(g => y >= g.y0 && y < g.y1);
+    if (!hit) { tip.style.display = "none"; return; }
+    tipAt(el, tip, e, cv, `${hit.b.label}<br><b>${fmt(hit.b.value)} ${t.unit || ""}</b>`);
+  });
+  cv.addEventListener("mouseleave", () => tip.style.display = "none");
+}
+
+// ── navigation ──────────────────────────────────────────────────────────────────
+function buttons() {
+  const nav = $("groups"); nav.innerHTML = "";
+  META.groups.forEach((g, i) => { const b = document.createElement("button"); b.textContent = g.title;
+    if (i === cur) b.className = "on"; b.onclick = () => go(i); nav.append(b); });
+  const rs = $("ranges"); rs.innerHTML = "";
+  META.ranges.forEach(r => { const b = document.createElement("button"); b.textContent = r;
+    if (r === range) b.className = "on"; b.onclick = () => { range = r; load(); }; rs.append(b); });
+  const ts = $("themes"); ts.innerHTML = "";
+  META.themes.forEach(t => {
+    const o = document.createElement("option"); o.value = t.id;
+    const tag = {validated: " ✓", floor: " ✓ (with line labels)", mono: " — print, line styles", fails: " (not colour-blind safe)"}[t.status] || "";
+    o.textContent = `theme: ${t.name}${tag}`;
+    o.title = t.note; if (TH && t.id === TH.id) o.selected = true; ts.append(o);
+  });
+  ts.onchange = () => applyTheme(ts.value);
+}
+function go(i) { cur = (i + META.groups.length) % META.groups.length; load(); }
+async function load() {
+  location.hash = META.groups[cur].id + "/" + range; buttons();
+  try {
+    const r = await fetch(`api/group/${META.groups[cur].id}?range=${range}`);
+    if (!r.ok) throw new Error(r.status + " " + r.statusText);
+    data = await r.json(); render();
+  } catch (e) { $("stamp").textContent = "fetch failed: " + e.message; }
+  clearTimeout(timer); timer = setTimeout(load, 30000);
+}
+addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") go(cur + 1);
+  if (e.key === "ArrowLeft") go(cur - 1);
+  if (e.key === "t") { const i = META.themes.findIndex(t => t.id === TH.id); applyTheme(META.themes[(i + 1) % META.themes.length].id); }
+  const k = "123456".indexOf(e.key); if (k >= 0 && META.ranges[k]) { range = META.ranges[k]; load(); }
+});
+let tx = null, ty = null;
+addEventListener("touchstart", e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, {passive:true});
+addEventListener("touchend", e => {
+  if (tx === null) return;
+  const dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
+  if (Math.abs(dx) > 70 && Math.abs(dx) > 2*Math.abs(dy)) go(cur + (dx < 0 ? 1 : -1));
+  tx = null;
+}, {passive:true});
+let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(render, 150); });
+
+(async () => {
+  META = await (await fetch("api/meta")).json();
+  $("brand").textContent = META.title; document.title = META.title;
+  range = META.default_range;
+  const [h, rg] = location.hash.slice(1).split("/");
+  const i = META.groups.findIndex(g => g.id === h); if (i >= 0) cur = i;
+  if (META.ranges.includes(rg)) range = rg;
+  const q = new URLSearchParams(location.search).get("theme");
+  applyTheme(q || localStorage.getItem("askee-theme") || META.default_theme);
+  load();
+})();
+</script>
+</body>
+</html>
