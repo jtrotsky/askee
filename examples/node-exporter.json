@@ -2,10 +2,16 @@
   "title": "my-box",
   "vm": "http://127.0.0.1:8428",
   "default_range": "24h",
-  "default_theme": "reference",
+  "default_theme": "auto",
   "thermal_range": [
     30,
     100
+  ],
+  "events": [
+    {
+      "label": "reboot",
+      "expr": "node_boot_time_seconds"
+    }
   ],
   "groups": [
     {
@@ -26,7 +32,7 @@
       "id": "cpu",
       "group": "system",
       "kind": "line",
-      "title": "CPU busy, by kind",
+      "title": "CPU busy",
       "unit": "%",
       "ymin": 0,
       "ymax": 100,
@@ -42,7 +48,7 @@
         },
         {
           "expr": "100 * avg(rate(node_cpu_seconds_total{mode=~\"nice|interrupt\"}))",
-          "name": "nice+irq"
+          "name": "other"
         }
       ]
     },
@@ -50,7 +56,7 @@
       "id": "temp",
       "group": "system",
       "kind": "line",
-      "title": "CPU temperature, hottest core",
+      "title": "CPU temperature",
       "unit": "°C",
       "thermal": true,
       "series": [
@@ -74,7 +80,7 @@
       "id": "load",
       "group": "system",
       "kind": "line",
-      "title": "Load average",
+      "title": "Load",
       "unit": "",
       "ymin": 0,
       "series": [
@@ -98,7 +104,7 @@
       "id": "cpu_hour",
       "group": "system",
       "kind": "hour",
-      "title": "CPU busy by hour of day",
+      "title": "CPU busy by hour",
       "unit": "%",
       "range": "30d",
       "expr": "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1h])))"
@@ -107,18 +113,18 @@
       "id": "mem",
       "group": "memory",
       "kind": "line",
-      "title": "Memory, where it goes",
+      "title": "Memory use",
       "unit": "GiB",
       "ymin": 0,
       "stack": true,
       "series": [
         {
           "expr": "node_zfs_arcstats_size_bytes / 2^30",
-          "name": "ZFS ARC"
+          "name": "ZFS cache"
         },
         {
           "expr": "(node_memory_wired_bytes - node_zfs_arcstats_size_bytes) / 2^30",
-          "name": "wired"
+          "name": "kernel"
         },
         {
           "expr": "node_memory_active_bytes / 2^30",
@@ -130,7 +136,7 @@
         },
         {
           "expr": "(node_memory_laundry_bytes + node_memory_free_bytes) / 2^30",
-          "name": "free+laundry"
+          "name": "free"
         }
       ],
       "refs": [
@@ -164,7 +170,7 @@
       "id": "arc_hit",
       "group": "memory",
       "kind": "line",
-      "title": "ZFS cache hit ratio",
+      "title": "ZFS cache hits",
       "unit": "%",
       "ymax": 100,
       "series": [
@@ -182,7 +188,7 @@
       "id": "wan",
       "group": "network",
       "kind": "line",
-      "title": "Network (main interface)",
+      "title": "Network traffic",
       "unit": "MB/s",
       "ymin": 0,
       "series": [

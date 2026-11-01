@@ -30,6 +30,7 @@ type Config struct {
 	Thermal      [2]float64 `json:"thermal_range"` // °C mapped to the cool→hot ramp
 	DefaultRange string     `json:"default_range"`
 	DefaultTheme string     `json:"default_theme"`
+	Events       []EventCfg `json:"events"` // drawn on every line chart: "what happened here?"
 	Groups       []Group    `json:"groups"`
 	Pages        []PageCfg  `json:"pages"`
 }
@@ -37,6 +38,18 @@ type Config struct {
 type Group struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+}
+
+// EventCfg names a metric whose VALUE is a unix timestamp (node_boot_time_seconds,
+// a job's last-run time): every distinct value inside the window becomes a labelled event.
+type EventCfg struct {
+	Label string `json:"label"`
+	Expr  string `json:"expr"`
+}
+
+type event struct {
+	T     float64 `json:"t"`
+	Label string  `json:"label"`
 }
 
 type SeriesCfg struct {
@@ -65,12 +78,14 @@ type PageCfg struct {
 	Refs     []RefCfg    `json:"refs"`
 	Thermal  bool        `json:"thermal"` // colour the line by absolute value (°C)
 	Stack    bool        `json:"stack"`   // series are parts of a whole: draw stacked
+	Split    bool        `json:"split"`   // small multiples: one panel per series, each with its own scale
 	Expr     string      `json:"expr"`    // hour / instant / runs
 	Label    string      `json:"label"`   // instant: label naming each bar
 	Key      string      `json:"key"`     // runs: the per-run timestamp metric; snapshot: section key
 	MinValue float64     `json:"min_value"`
 	Limit    int         `json:"limit"`
 	Note     string      `json:"note"`
+	Span     [2]int      `json:"span"` // [columns, rows] in the web grid; 0 = automatic
 }
 
 type ref struct {
@@ -94,6 +109,8 @@ type model struct {
 	yMax    *float64
 	thermal bool
 	stack   bool
+	split   bool
+	events  []event
 	note    string
 	start   time.Time
 	end     time.Time
@@ -108,6 +125,7 @@ type rng struct {
 }
 
 var ranges = []rng{
+	{"15m", 15 * time.Minute, 15 * time.Second},
 	{"1h", time.Hour, 15 * time.Second},
 	{"6h", 6 * time.Hour, time.Minute},
 	{"24h", 24 * time.Hour, 5 * time.Minute},
@@ -146,7 +164,7 @@ func loadConfig(path string) (*Config, error) {
 		c.DefaultRange = "24h"
 	}
 	if c.DefaultTheme == "" {
-		c.DefaultTheme = "terminal"
+		c.DefaultTheme = "auto" // newsprint on a light system, carbon on a dark one
 	}
 	if c.PriceLabel == "" {
 		c.PriceLabel = "$/mo"
@@ -192,7 +210,7 @@ func (p page) fetch(r rng) model {
 	if p.Range != "" && p.Range != "now" && p.Range != "snapshot" {
 		r, _ = rangeByName(p.Range)
 	}
-	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, note: p.Note}
+	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, split: p.Split, note: p.Note}
 	end := time.Now()
 	start := end.Add(-r.span)
 	switch p.Kind {
@@ -204,6 +222,7 @@ func (p page) fetch(r rng) model {
 		m.series, m.err = rangeSeries(qs, start, end, r.step)
 		m.start, m.end, m.step = start, end, r.step
 		m.refs = p.resolveRefs()
+		m.events = p.cfg.eventsIn(start, end)
 	case "hour":
 		m.kind = "bars"
 		s, err := rangeSeries([]q{{expr: p.Expr, name: "v"}}, end.Add(-30*24*time.Hour), end, time.Hour)
@@ -471,4 +490,36 @@ func barsFromText(lines []string) ([]bar, string, bool) {
 		unit = m[3]
 	}
 	return bars, unit, len(bars) > 0
+}
+
+// eventsIn returns the configured events whose timestamps fall inside [start, end].
+func (c *Config) eventsIn(start, end time.Time) []event {
+	var out []event
+	for _, e := range c.Events {
+		res, err := rangeSeries([]q{{expr: e.Expr, name: e.Label}}, start, end, time.Hour)
+		if err != nil {
+			continue
+		}
+		// a boot time read off a live clock jitters by a second or two between scrapes:
+		// values within five minutes of one already seen are the same event
+		var seen []int64
+	next:
+		for _, s := range res {
+			for _, v := range s.v {
+				t := int64(v)
+				if t < start.Unix() || t > end.Unix() {
+					continue
+				}
+				for _, o := range seen {
+					if t-o < 300 && o-t < 300 {
+						continue next
+					}
+				}
+				seen = append(seen, t)
+				out = append(out, event{float64(t), e.Label})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].T < out[j].T })
+	return out
 }

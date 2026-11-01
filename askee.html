@@ -22,17 +22,21 @@
   button:hover { color:var(--text); }
   select { background:var(--panel); color:var(--text); border:1px solid var(--border); font:inherit; padding:3px 6px; border-radius:3px; }
   .stamp { margin-left:auto; color:var(--dim); }
-  main { display:grid; gap:var(--gap); padding:var(--gap); grid-template-columns:repeat(var(--cols,2), minmax(0,1fr)); }
-  .tile { background:var(--panel); border:1px solid var(--border); border-radius:4px; height:var(--tileh);
+  main { display:grid; gap:var(--gap); padding:var(--gap); grid-template-columns:repeat(var(--cols,2), minmax(0,1fr)); grid-auto-rows:var(--cellh,300px); grid-auto-flow:row dense; }
+  .body { overflow-y:auto; }
+  .pager { display:flex; gap:4px; align-items:center; color:var(--dim); }
+  .tile { background:var(--panel); border:1px solid var(--border); border-radius:4px;
           display:flex; flex-direction:column; min-width:0; position:relative; }
   .tile h2 { margin:0; padding:6px 10px 0; font-size:13px; color:var(--title); font-weight:700;
              white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tile h2 small { color:var(--dim); font-weight:400; margin-left:6px; }
-  .tile .sub { padding:0 10px; color:var(--dim); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:15px; }
-  .legend { padding:2px 10px 0; display:flex; flex-wrap:wrap; gap:2px 12px; font-size:12px; min-height:16px; }
-  .legend i { display:inline-block; width:9px; height:9px; margin-right:4px; border-radius:2px; vertical-align:-1px; }
+  .tile .why { color:var(--dim); font-weight:400; margin-left:6px; cursor:help; }
+  .tile .why:hover, .tile .why:focus { color:var(--text); outline:none; }
+  .tile .sub { display:none; position:absolute; left:8px; right:8px; top:26px; z-index:3; padding:5px 8px;
+               background:var(--surface); border:1px solid var(--border); color:var(--text); font-size:12px; white-space:normal; }
+  .tile.open .sub { display:block; }
   .body { flex:1; min-height:0; position:relative; }
-  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  canvas { position:absolute; left:0; top:0; width:100%; height:100%; }
   pre { margin:0; padding:4px 10px; overflow:auto; height:100%; color:var(--text); }
   .foot { padding:2px 10px 6px; color:var(--dim); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .err { color:var(--accent); padding:10px; }
@@ -46,19 +50,21 @@
   <div class="brand" id="brand">askee</div>
   <nav id="groups"></nav>
   <div class="ranges" id="ranges"></div>
+  <div class="pager" id="pager"></div>
   <select id="themes" title="theme (t cycles)"></select>
   <div class="stamp" id="stamp"></div>
 </header>
 <main id="grid"></main>
 <script>
 "use strict";
-let META = null, TH = null, PAL = [], SEQ = [], cur = 0, range = "24h", data = null, timer = null;
+let META = null, TH = null, PAL = [], SEQ = [], cur = 0, page = 0, pages = [[]], range = "24h", data = null, timer = null, themeChoice = "auto";
 const $ = id => document.getElementById(id);
 
 function fmt(v) {
   const a = Math.abs(v);
   if (a >= 1e6) return (v/1e6).toFixed(2) + "M";
   if (a >= 1e4) return (v/1e3).toFixed(1) + "k";
+  if (a >= 1000) return Math.round(v).toLocaleString("en-NZ");   // thousands separator
   if (a >= 100) return v.toFixed(0);
   if (a >= 10) return v.toFixed(1);
   return v.toFixed(2);
@@ -85,44 +91,64 @@ function thermalAt(v) {
   return ramp(st, f);
 }
 const dashOf = i => (TH.mono || TH.dashed) ? META.dashes[i % META.dashes.length] : [];
-// a hatch pattern for mono fills: ink lines on the panel, angle and spacing vary by band
-function hatch(c, ink, i) {
-  const p = document.createElement("canvas"); p.width = p.height = 8;
-  const g = p.getContext("2d"); g.strokeStyle = alpha(ink, .55); g.lineWidth = 1;
-  g.beginPath();
-  if (i % 3 === 0) { g.moveTo(0, 8); g.lineTo(8, 0); }
-  else if (i % 3 === 1) { g.moveTo(0, 0); g.lineTo(8, 8); }
-  else { g.moveTo(0, 4); g.lineTo(8, 4); }
-  g.stroke(); return c.createPattern(p, "repeat");
-}
-function swatch(i, col) {
-  if (!TH.mono && !TH.dashed) { const sw = document.createElement("i"); sw.style.background = col; return sw; }
-  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("width", "22"); svg.setAttribute("height", "8"); svg.style.marginRight = "4px";
-  const l = document.createElementNS(ns, "line");
-  Object.entries({x1: 0, y1: 4, x2: 22, y2: 4, stroke: col, "stroke-width": 2, "stroke-dasharray": dashOf(i).join(" ")}).forEach(([k, v]) => l.setAttribute(k, v));
-  svg.append(l); return svg;
-}
-
+// "auto" follows the system: newsprint on a light system, carbon on a dark one — the two
+// print themes, so the default is the most accessible one in either light.
+const sysLight = matchMedia("(prefers-color-scheme: light)");
+function resolveTheme(id) { return id === "auto" ? (sysLight.matches ? "newsprint" : "carbon") : id; }
+sysLight.addEventListener("change", () => { if (themeChoice === "auto") applyTheme("auto"); });
 function applyTheme(id) {
-  TH = META.themes.find(t => t.id === id) || META.themes[0];
+  themeChoice = id;
+  const rid = resolveTheme(id);
+  TH = META.themes.find(t => t.id === rid) || META.themes[0];
   const names = ["surface","panel","border","grid","text","dim","title","accent"];
   names.forEach((n, i) => document.documentElement.style.setProperty("--" + n, TH.vars[i]));
   PAL = TH.palette; SEQ = TH.seq;
-  localStorage.setItem("askee-theme", TH.id);
+  localStorage.setItem("askee-theme", themeChoice);
   buttons(); render();
 }
 
-// ── layout: fill the screen. Wide = cols × rows of the viewport; narrow = scroll ──────
-function layout(n) {
-  const w = innerWidth, h = innerHeight - document.querySelector("header").offsetHeight;
-  let cols = w >= 1700 ? (n > 4 ? 3 : 2) : w >= 820 ? 2 : 1;
-  if (n === 1) cols = 1;
-  const rows = Math.ceil(n / cols), gap = 8;
-  const th = cols === 1 && w < 820 ? Math.max(270, Math.round(innerHeight * 0.46))
-                                   : Math.max(230, Math.floor((h - gap*(rows+1)) / rows));
-  document.documentElement.style.setProperty("--cols", cols);
-  document.documentElement.style.setProperty("--tileh", th + "px");
+// ── layout ───────────────────────────────────────────────────────────────────────
+// The viewport is a grid of cells: columns by width, rows by how many readable tiles fit the
+// height (a tile is never squeezed below MIN_TILE px). Each chart takes [cols, rows] cells —
+// from the config's span, or worked out from how many bars or lines it must show at a
+// readable size. Charts are packed in order into pages of cols × rows cells: ↑/↓ moves
+// between pages, ←/→ between groups. On a phone (one column) the page simply scrolls.
+const MIN_TILE = 250, GAP = 8, BAR_ROW = 15, TEXT_ROW = 16;
+function geometry() {
+  const w = innerWidth, h = innerHeight - document.querySelector("header").offsetHeight - GAP;
+  const cols = w >= 1700 ? 3 : w >= 820 ? 2 : 1;
+  const phone = cols === 1;
+  const rows = phone ? 999 : Math.max(1, Math.floor((h + GAP) / (MIN_TILE + GAP)));
+  const cellH = phone ? Math.max(280, Math.round(innerHeight * 0.46)) : Math.floor((h - GAP*(rows - 1)) / rows);
+  return {cols, rows, cellH, phone};
+}
+function spanOf(t, g) {
+  let [c, r] = t.span || [0, 0];
+  c = Math.min(Math.max(c || 1, 1), g.cols);
+  if (!r) {   // automatic height: enough rows for the content at a readable size
+    const chrome = 48;   // title and footer
+    const need = t.kind === "bars" ? chrome + (t.bars || []).length * BAR_ROW
+               : t.kind === "text" ? chrome + (t.lines || []).length * TEXT_ROW : 0;
+    r = need ? Math.ceil((need + GAP) / (g.cellH + GAP)) : 1;
+  }
+  return [c, Math.min(Math.max(r, 1), g.phone ? 4 : g.rows)];
+}
+// Pack in order. A tall chart that would overflow the page shrinks to the rows that are left
+// (its content scrolls inside the tile at full size) rather than leaving a hole and a new page.
+function paginate(tiles, g) {
+  if (g.phone) return [tiles.map((t, i) => ({i, span: spanOf(t, g)}))];
+  const cap = g.cols * g.rows, out = [[]];
+  let used = 0;
+  tiles.forEach((t, i) => {
+    let [c, r] = spanOf(t, g);
+    if (used + c * r > cap) {
+      const rr = Math.floor((cap - used) / c);
+      if (rr >= 1 && r > 1) r = rr;
+      else if (out[out.length - 1].length) { out.push([]); used = 0; }
+    }
+    out[out.length - 1].push({i, span: [c, r]}); used += c * r;
+  });
+  return out;
 }
 
 function setup(cv) {
@@ -138,41 +164,86 @@ function stacked(series) {
   return series.map(s => ({name: s.name, t: s.t, v: s.v.map((v, k) => { const x = (acc.get(s.t[k]) || 0) + v; acc.set(s.t[k], x); return x; })}));
 }
 
-function drawLine(cv, t) {
-  const [c, W, H] = setup(cv);
-  const L = 48, R = 12, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
-  const S = t.stack ? stacked(t.series || []) : (t.series || []);
-  let lo = Infinity, hi = -Infinity;
-  for (const s of S) for (const v of s.v) { if (v < lo) lo = v; if (v > hi) hi = v; }
-  for (const r of t.refs || []) { lo = Math.min(lo, r.value); hi = Math.max(hi, r.value); }
-  if (!isFinite(lo)) { c.fillStyle = TH.vars[5]; c.fillText("no data in this range", L + 8, T + ph/2); return null; }
-  if (t.ymin != null) lo = Math.min(lo, t.ymin); else { const p = (hi - lo)*0.1 || Math.max(1, Math.abs(hi)*0.1); lo -= p; }
-  if (t.ymax != null) { hi = Math.max(hi, t.ymax); if (t.ymax === 100) hi = Math.min(hi, 100); } else hi += (hi - lo)*0.1;
-  if (hi <= lo) hi = lo + 1;
-  const X = ts => L + (ts - t.start) / (t.end - t.start) * pw, Y = v => T + (1 - (v - lo)/(hi - lo)) * ph;
-  // recessive grid: faint rules, dim labels
-  c.strokeStyle = TH.vars[3]; c.lineWidth = 1; c.fillStyle = TH.vars[5]; c.textAlign = "right";
-  const ticks = ph > 160 ? 4 : 2;
-  for (let i = 0; i <= ticks; i++) {
-    const v = lo + (hi - lo)*i/ticks, y = Math.round(Y(v)) + .5;
-    c.beginPath(); c.moveTo(L, y); c.lineTo(L + pw, y); c.stroke(); c.fillText(fmt(v), L - 6, y);
+// Line charts follow Tufte and Wei: no legend box and no grid. Each line is named at its right
+// end with its latest value; the y axis is a range frame — a hairline spanning only the data,
+// labelled at the data's own min and max; reference values are dashed and named in the same
+// margin; events (reboots, backup runs) are hairlines with a word, so "what happened here?"
+// is answered on the chart.
+function spread(items, top, bot, h) {   // nudge end labels apart; keep them inside [top, bot]
+  items.sort((a, b) => a.y - b.y);
+  if (items.length) items[0].y = Math.max(top, items[0].y);
+  for (let i = 1; i < items.length; i++) if (items[i].y - items[i-1].y < h) items[i].y = items[i-1].y + h;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const lim = i === items.length - 1 ? bot : items[i+1].y - h;
+    if (items[i].y > lim) items[i].y = lim;
   }
-  const xt = pw > 520 ? 6 : pw > 280 ? 4 : 2;
-  for (let i = 0; i <= xt; i++) {
-    const ts = t.start + (t.end - t.start)*i/xt;
-    c.textAlign = i === 0 ? "left" : i === xt ? "right" : "center";
-    c.fillText(tfmt(ts, t.end - t.start), X(ts), T + ph + 11);
-  }
-  // reference lines: "compared to what" — dashed, recessive, labelled
-  c.save(); c.setLineDash([4, 4]); c.lineWidth = 1;
-  for (const r of t.refs || []) {
-    const y = Math.round(Y(r.value)) + .5;
-    c.strokeStyle = TH.vars[5]; c.beginPath(); c.moveTo(L, y); c.lineTo(L + pw, y); c.stroke();
-    c.fillStyle = TH.vars[5]; c.textAlign = "right"; c.fillText(`${r.label} ${fmt(r.value)}${t.unit || ""}`, L + pw - 2, y - 7);
-  }
+  for (const it of items) it.y = Math.max(top, it.y);
+  return items;
+}
+const lastOf = s => s.v[s.v.length - 1];
+function endText(t, s, n) { return (n === 1 ? "" : s.name + " ") + fmt(lastOf(s)) + (t.unit || ""); }
+function sample(c, x, y, col, dash, band) {  // the line's own style, so a label needs no colour
+  c.save();
+  if (band) { c.fillStyle = band; c.fillRect(x, y - 4, 10, 8); c.strokeStyle = col; c.lineWidth = 1; c.strokeRect(x + .5, y - 3.5, 9, 7); }
+  else { c.strokeStyle = col; c.lineWidth = 2; c.setLineDash(dash); c.beginPath(); c.moveTo(x, y); c.lineTo(x + 12, y); c.stroke(); }
   c.restore();
+}
+function bandFill(c, col, i, T, ph) {
+  if (TH.mono) return alpha(col, .10 + .12 * (i % 4));          // solid grey tints, never hatching
+  if (TH.style === "smooth") { const g = c.createLinearGradient(0, T, 0, T + ph); g.addColorStop(0, alpha(col, .75)); g.addColorStop(1, alpha(col, .45)); return g; }
+  return alpha(col, .62);
+}
+
+// one panel: range frame, refs, events, the data, and its end labels
+function panel(c, t, raw, b, opts) {
+  const S = t.stack ? stacked(raw) : raw, u = t.unit || "";
+  let dlo = Infinity, dhi = -Infinity;
+  for (const s of S) for (const v of s.v) { if (v < dlo) dlo = v; if (v > dhi) dhi = v; }
+  if (!isFinite(dlo)) return null;
+  let lo = dlo, hi = dhi;
+  if (!opts.split) for (const r of t.refs || []) { lo = Math.min(lo, r.value); hi = Math.max(hi, r.value); }
+  if (t.ymin != null) lo = Math.min(lo, t.ymin); else { const p = (hi - lo)*0.08 || Math.max(1, Math.abs(hi)*0.1); lo -= p; }
+  if (t.ymax != null) { hi = Math.max(hi, t.ymax); if (t.ymax === 100) hi = Math.min(hi, 100); } else hi += (hi - lo)*0.06;
+  if (hi <= lo) hi = lo + 1;
+  const {L, T, pw, ph} = b;
+  const X = ts => L + (ts - t.start) / (t.end - t.start) * pw, Y = v => T + (1 - (v - lo)/(hi - lo)) * ph;
+  // range frame: the axis is drawn only where the data is, and says where that is
+  const ax = L - 5;
+  c.strokeStyle = TH.vars[5]; c.lineWidth = 1; c.setLineDash([]);
+  c.beginPath(); c.moveTo(ax + .5, Math.round(Y(dhi))); c.lineTo(ax + .5, Math.round(Y(dlo)) + 1); c.stroke();
+  c.textAlign = "right"; c.fillStyle = TH.vars[4];
+  const yHi = Y(dhi), yLo = Y(dlo);
+  c.fillText(fmt(dhi), ax - 4, yHi);
+  if (yLo - yHi > 12) c.fillText(fmt(dlo), ax - 4, yLo);
+  // a fixed scale (0–100 %, zero baseline) is stated once, quietly, where it does not collide
+  c.fillStyle = TH.vars[5];
+  if (t.ymin != null && Y(lo) - yLo > 12) c.fillText(fmt(lo), ax - 4, Y(lo));
+  if (t.ymax != null && yHi - Y(hi) > 12) c.fillText(fmt(hi), ax - 4, Y(hi));
+  const labels = [];
+  // reference lines: "compared to what" — dashed, recessive, named at the right end
+  if (!opts.split) {
+    c.save(); c.setLineDash([4, 4]); c.lineWidth = 1; c.strokeStyle = TH.vars[5];
+    for (const r of t.refs || []) {
+      const y = Math.round(Y(r.value)) + .5;
+      c.beginPath(); c.moveTo(L, y); c.lineTo(L + pw, y); c.stroke();
+      labels.push({y, text: `${r.label} ${fmt(r.value)}${u}`, ref: true});
+    }
+    c.restore();
+  }
+  // events: a hairline and a word, at the top of the panel
+  if (opts.events) {
+    let lastX = -Infinity;
+    c.save(); c.strokeStyle = TH.vars[5]; c.lineWidth = 1; c.setLineDash([1, 3]); c.fillStyle = TH.vars[5]; c.textAlign = "left";
+    for (const e of t.events || []) {
+      if (e.t < t.start || e.t > t.end) continue;
+      const x = Math.round(X(e.t)) + .5;
+      c.beginPath(); c.moveTo(x, T); c.lineTo(x, T + ph); c.stroke();
+      if (x - lastX > 60) { c.fillText(e.label, x + 3, T - 10); lastX = x; }
+    }
+    c.restore();
+  }
   const gap = 3 * (t.step || 60);
-  const path = (s, close) => {
+  const path = (s, close, under) => {
     c.beginPath(); let pen = false, last = 0, first = null, prevX = 0;
     for (let k = 0; k < s.t.length; k++) {
       const x = X(s.t[k]), y = Y(s.v[k]);
@@ -181,26 +252,30 @@ function drawLine(cv, t) {
     }
     if (close && first !== null) { c.lineTo(prevX, T + ph); c.lineTo(first, T + ph); c.closePath(); }
   };
+  const colOf = i => PAL[(opts.colour ?? i) % PAL.length];
   if (t.stack) {
-    // parts of a whole: filled bands, top series drawn first so lower bands sit on top
+    // parts of a whole: bands, top first so lower bands sit on top; each named at its middle
     for (let i = S.length - 1; i >= 0; i--) {
-      const s = S[i], col = PAL[i % PAL.length];
-      if (TH.mono) { c.fillStyle = alpha(col, .10 + .08 * (i % 3)); path(s, true); c.fill(); c.fillStyle = hatch(c, col, i); }
-      else if (TH.style === "smooth") { const g = c.createLinearGradient(0, T, 0, T + ph); g.addColorStop(0, alpha(col, .75)); g.addColorStop(1, alpha(col, .45)); c.fillStyle = g; }
-      else c.fillStyle = alpha(col, .62);
-      path(s, true); c.fill();
-      c.strokeStyle = TH.vars[1]; c.lineWidth = 1; path(s, false); c.stroke();
+      const s = S[i], col = colOf(i);
+      c.fillStyle = bandFill(c, col, i, T, ph); path(s, true); c.fill();
+      c.strokeStyle = TH.mono ? col : TH.vars[1]; c.lineWidth = 1; path(s, false); c.stroke();
     }
+    S.forEach((s, i) => {
+      if (!s.v.length) return;
+      const below = i ? lastOf(S[i-1]) : lo;
+      labels.push({y: (Y(lastOf(s)) + Y(below)) / 2, text: endText(t, raw[i], S.length), col: colOf(i), band: bandFill(c, colOf(i), i, T, ph)});
+    });
   } else {
     S.forEach((s, i) => {
-      const col = PAL[i % PAL.length];
-      if (TH.style === "smooth" && S.length <= 2 && s.v.length) {   // soft gradient wash: smooth themes only
+      if (!s.v.length) return;
+      const col = colOf(i), dash = opts.split ? [] : dashOf(i);
+      if (TH.style === "smooth" && S.length <= 2) {   // soft gradient wash: smooth themes only
         const g = c.createLinearGradient(0, T, 0, T + ph);
         if (t.thermal && !TH.mono) { [0, .5, 1].forEach(f => g.addColorStop(f, alpha(thermalAt(hi - (hi - lo)*f), .22 - .18*f))); }
         else { g.addColorStop(0, alpha(col, .30)); g.addColorStop(1, alpha(col, 0)); }
         c.fillStyle = g; path(s, true); c.fill();
       }
-      c.lineWidth = TH.mono ? 1.6 : 2; c.lineJoin = "round"; c.setLineDash(dashOf(i));
+      c.lineWidth = 2; c.lineJoin = "round"; c.setLineDash(dash);
       if (t.thermal && !TH.mono) {      // the line itself carries temperature: each segment coloured by value
         for (let k = 1; k < s.t.length; k++) {
           if (s.t[k] - s.t[k-1] > gap) continue;
@@ -209,18 +284,63 @@ function drawLine(cv, t) {
         }
       } else { c.strokeStyle = col; path(s, false); c.stroke(); }
       c.setLineDash([]);
+      const lc = t.thermal && !TH.mono ? thermalAt(lastOf(s)) : col;
+      labels.push({y: Y(lastOf(s)), text: opts.name ? `${s.name} ${fmt(lastOf(s))}${u}` : endText(t, s, S.length), col: lc, dash});
     });
   }
-  return {X, Y, L, pw, T, ph, S};
+  // the right margin: every line and reference named where it ends, never overlapping
+  const lx = L + pw + 6;
+  for (const it of spread(labels, T + 5, T + ph - 2, 13)) {
+    if (it.ref) { c.fillStyle = TH.vars[5]; c.textAlign = "left"; c.fillText(it.text, lx, it.y); continue; }
+    sample(c, lx, it.y, it.col, it.dash || [], it.band);
+    c.fillStyle = TH.vars[4]; c.textAlign = "left"; c.fillText(it.text, lx + 16, it.y);
+  }
+  return {X, Y};
+}
+
+function marginFor(c, t, W) {
+  const u = t.unit || "", S = t.series || [];
+  const texts = S.filter(s => s.v.length).map(s => (S.length === 1 && !t.split ? "" : s.name + " ") + fmt(lastOf(s)) + u)
+    .map(x => 16 + c.measureText(x).width);
+  if (!t.split) for (const r of t.refs || []) texts.push(c.measureText(`${r.label} ${fmt(r.value)}${u}`).width);
+  return Math.min(W * 0.40, Math.max(24, ...texts) + 10);
+}
+
+function drawLine(cv, t) {
+  const [c, W, H] = setup(cv);
+  const S = t.series || [];
+  const ev = (t.events || []).some(e => e.t >= t.start && e.t <= t.end);
+  const L = 46, T = ev ? 22 : 8, B = 20, R = marginFor(c, t, W), pw = W - L - R, ph = H - T - B;
+  if (!S.some(s => s.v.length)) { c.fillStyle = TH.vars[5]; c.fillText("no data in this range", L + 8, T + ph/2); return null; }
+  const xLabels = () => {
+    c.fillStyle = TH.vars[5];
+    const xt = pw > 520 ? 4 : pw > 280 ? 3 : 2;
+    for (let i = 0; i <= xt; i++) {
+      const ts = t.start + (t.end - t.start)*i/xt;
+      c.textAlign = i === 0 ? "left" : i === xt ? "right" : "center";
+      c.fillText(tfmt(ts, t.end - t.start), L + pw*i/xt, T + ph + 11);
+    }
+  };
+  if (t.split && S.length > 1) {
+    // small multiples: one panel per series, each on its own scale (said in the frame labels)
+    const n = S.length, g = 16, h = (ph - g*(n - 1)) / n;
+    S.forEach((s, i) => panel(c, t, [s], {L, T: T + i*(h + g), pw, ph: h}, {split: true, name: true, colour: i, events: i === 0}));
+    xLabels();
+    return {L, pw, T, ph, S};
+  }
+  const g = panel(c, t, S, {L, T, pw, ph}, {events: true});
+  xLabels();
+  return {...g, L, pw, T, ph, S};
 }
 
 function drawBars(cv, t) {
+  const need = 6 + (t.bars || []).length * BAR_ROW;
+  if (need > cv.parentElement.clientHeight) cv.style.height = need + "px";
   const [c, W, H] = setup(cv);
   let bars = t.bars || [];
   if (!bars.length) { c.fillStyle = TH.vars[5]; c.fillText("no data", 10, 14); return null; }
-  const rowH = Math.max(8, Math.min(26, (H - 6) / bars.length)), fit = Math.floor((H - 6) / rowH);  // shrink before dropping rows: an hour-of-day chart needs all 24
-  c.font = (rowH < 12 ? "9px" : "11px") + " ui-monospace,Menlo,Consolas,monospace";
-  if (bars.length > fit) bars = bars.slice(bars.length - fit);
+  // rows never shrink below a readable height; if they still do not fit, the tile scrolls
+  const rowH = Math.max(BAR_ROW, Math.min(26, (H - 6) / bars.length));
   const lw = Math.min(W*0.42, Math.max(...bars.map(b => c.measureText(b.label).width)) + 12);
   const max = Math.max(...bars.map(b => b.value), t.unit === "%" ? 100 : 0) || 1, vw = 76, bw = W - lw - vw - 14;  // % is drawn against 100
   const geo = [];
@@ -241,40 +361,56 @@ function drawBars(cv, t) {
   return geo;
 }
 
-function stats(s, unit) {
-  let mn = Infinity, mx = -Infinity, sum = 0;
-  for (const v of s.v) { mn = Math.min(mn, v); mx = Math.max(mx, v); sum += v; }
-  return `${s.name}: min ${fmt(mn)} · max ${fmt(mx)} · mean ${fmt(sum/s.v.length)} ${unit || ""}`;
-}
+// live: on 15m and 1h the plot window slides with the clock every second (btm-style); the data
+// itself refreshes every 15 s. Only the canvases are redrawn, so hover and layout stay put.
+let live = [];
+const isLive = () => range === "15m" || range === "1h";
+setInterval(() => {
+  if (!isLive() || !live.length) return;
+  const now = Date.now() / 1000;
+  for (const L of live) {
+    if (L.t.fixed) continue;
+    const span = L.t.end - L.t.start; L.t.end = now; L.t.start = now - span;
+    const g = drawLine(L.cv, L.t); if (g) Object.assign(L.g, g);
+  }
+}, 1000);
 
 function render() {
   if (!data || !TH) return;
-  const grid = $("grid");
-  layout(data.tiles.length);
+  live = [];
+  const grid = $("grid"), g = geometry();
+  pages = paginate(data.tiles, g);
+  page = Math.min(page, pages.length - 1);
+  document.documentElement.style.setProperty("--cols", g.cols);
+  document.documentElement.style.setProperty("--cellh", g.cellH + "px");
   grid.innerHTML = "";
-  for (const t of data.tiles) {
+  pager();
+  for (const {i: idx, span: [sc, sr]} of pages[page]) {
+    const t = data.tiles[idx];
     const el = document.createElement("section"); el.className = "tile";
-    el.innerHTML = `<h2></h2><div class="sub"></div><div class="legend"></div><div class="body"></div><div class="foot"></div><div class="tip"></div>`;
+    el.style.gridColumn = `span ${sc}`; el.style.gridRow = `span ${sr}`;
+    el.style.height = (sr * g.cellH + (sr - 1) * GAP) + "px";
+    el.innerHTML = `<h2></h2><div class="sub"></div><div class="body"></div><div class="foot"></div><div class="tip"></div>`;
+    // the title says what, in a few words; the "so what" waits behind the (i) until asked for
     const h2 = el.querySelector("h2"); h2.textContent = t.title;
-    const sm = document.createElement("small"); sm.textContent = t.fixed || data.range; h2.append(sm);
-    el.querySelector(".sub").textContent = t.subtitle || "";
+    const sm = document.createElement("small"); sm.textContent = [t.unit, t.fixed || data.range].filter(Boolean).join(" · "); h2.append(sm);
+    if (t.subtitle) {
+      const w = document.createElement("span"); w.className = "why"; w.textContent = "ⓘ"; w.tabIndex = 0;
+      w.setAttribute("aria-label", t.subtitle); h2.append(w);
+      el.querySelector(".sub").textContent = t.subtitle;
+      let pinned = false;
+      w.onmouseenter = w.onfocus = () => el.classList.add("open");
+      w.onmouseleave = w.onblur = () => { if (!pinned) el.classList.remove("open"); };
+      w.onclick = () => { pinned = !pinned; el.classList.toggle("open", pinned); };
+    }
     grid.appendChild(el);
-    const body = el.querySelector(".body"), foot = el.querySelector(".foot"), leg = el.querySelector(".legend");
+    const body = el.querySelector(".body"), foot = el.querySelector(".foot");
     if (t.err) { body.innerHTML = `<div class="err"></div>`; body.firstChild.textContent = "error: " + t.err; continue; }
     if (t.kind === "line") {
-      (t.series || []).forEach((s, i) => {
-        if (!s.v.length || (t.series.length === 1)) return;   // one series: the title names it
-        const sp = document.createElement("span");
-        const col = t.thermal && !TH.mono ? thermalAt(s.v[s.v.length-1]) : PAL[i % PAL.length];
-        sp.append(swatch(i, col), `${s.name} ${fmt(s.v[s.v.length-1])}${t.unit || ""}`); leg.append(sp);
-      });
-      if (t.series && t.series.length === 1 && t.series[0].v.length) {
-        const s = t.series[0]; leg.textContent = `latest ${fmt(s.v[s.v.length-1])}${t.unit || ""}`;
-      }
       const cv = document.createElement("canvas"); body.append(cv);
       const geo = drawLine(cv, t);
-      if (t.series && t.series[0] && t.series[0].v.length) foot.textContent = stats(t.series[0], t.unit);
-      if (geo) hoverLine(el, cv, t, geo);
+      foot.textContent = t.note || "";
+      if (geo) { hoverLine(el, cv, t, geo); live.push({cv, t, g: geo}); }
     } else if (t.kind === "bars") {
       const cv = document.createElement("canvas"); body.append(cv);
       const geo = drawBars(cv, t);
@@ -283,7 +419,7 @@ function render() {
     } else {
       const pre = document.createElement("pre"); pre.textContent = (t.lines || []).join("\n"); body.append(pre);
       const longest = Math.max(1, ...(t.lines || []).map(l => [...l].length));
-      pre.style.fontSize = Math.max(8, Math.min(13, (body.clientWidth - 20) / (longest * 0.62))) + "px";
+      pre.style.fontSize = Math.max(11, Math.min(13, (body.clientWidth - 20) / (longest * 0.62))) + "px";   // never below 11px: wide tables scroll sideways instead
       foot.textContent = t.note || "";
     }
   }
@@ -331,15 +467,26 @@ function buttons() {
   META.ranges.forEach(r => { const b = document.createElement("button"); b.textContent = r;
     if (r === range) b.className = "on"; b.onclick = () => { range = r; load(); }; rs.append(b); });
   const ts = $("themes"); ts.innerHTML = "";
+  const ao = document.createElement("option"); ao.value = "auto";
+  ao.textContent = `theme: Auto (${sysLight.matches ? "Newsprint" : "Carbon"}, follows system)`;
+  if (themeChoice === "auto") ao.selected = true; ts.append(ao);
   META.themes.forEach(t => {
     const o = document.createElement("option"); o.value = t.id;
     const tag = {validated: " ✓", floor: " ✓ (with line labels)", mono: " — print, line styles", fails: " (not colour-blind safe)"}[t.status] || "";
     o.textContent = `theme: ${t.name}${tag}`;
-    o.title = t.note; if (TH && t.id === TH.id) o.selected = true; ts.append(o);
+    o.title = t.note; if (themeChoice !== "auto" && TH && t.id === TH.id) o.selected = true; ts.append(o);
   });
   ts.onchange = () => applyTheme(ts.value);
 }
-function go(i) { cur = (i + META.groups.length) % META.groups.length; load(); }
+function pager() {
+  const p = $("pager"); p.innerHTML = "";
+  if (pages.length < 2) return;
+  const up = document.createElement("button"); up.textContent = "▲"; up.title = "previous page (↑)"; up.onclick = () => turn(-1);
+  const dn = document.createElement("button"); dn.textContent = "▼"; dn.title = "next page (↓)"; dn.onclick = () => turn(1);
+  p.append(up, `page ${page + 1}/${pages.length}`, dn);
+}
+function turn(d) { const n = Math.max(0, Math.min(pages.length - 1, page + d)); if (n !== page) { page = n; render(); } }
+function go(i) { cur = (i + META.groups.length) % META.groups.length; page = 0; load(); }
 async function load() {
   location.hash = META.groups[cur].id + "/" + range; buttons();
   try {
@@ -347,13 +494,16 @@ async function load() {
     if (!r.ok) throw new Error(r.status + " " + r.statusText);
     data = await r.json(); render();
   } catch (e) { $("stamp").textContent = "fetch failed: " + e.message; }
-  clearTimeout(timer); timer = setTimeout(load, 30000);
+  clearTimeout(timer); timer = setTimeout(load, isLive() ? 15000 : 30000);
 }
 addEventListener("keydown", e => {
   if (e.key === "ArrowRight") go(cur + 1);
   if (e.key === "ArrowLeft") go(cur - 1);
+  if (e.key === "ArrowDown" && !geometry().phone) { e.preventDefault(); turn(1); }
+  if (e.key === "ArrowUp" && !geometry().phone) { e.preventDefault(); turn(-1); }
   if (e.key === "t") { const i = META.themes.findIndex(t => t.id === TH.id); applyTheme(META.themes[(i + 1) % META.themes.length].id); }
-  const k = "123456".indexOf(e.key); if (k >= 0 && META.ranges[k]) { range = META.ranges[k]; load(); }
+  if (e.key === "a") applyTheme("auto");
+  const k = "1234567".indexOf(e.key); if (k >= 0 && META.ranges[k]) { range = META.ranges[k]; load(); }
 });
 let tx = null, ty = null;
 addEventListener("touchstart", e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, {passive:true});

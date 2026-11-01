@@ -60,7 +60,7 @@ func printGroup(cfg *Config, g string, r rng, w, h int) int {
 	ms := fetchAll(ps, r)
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
-	th := themeByID(cfg.DefaultTheme)
+	th := themeByID(map[bool]string{true: "carbon", false: cfg.DefaultTheme}[cfg.DefaultTheme == "auto"])
 	fmt.Fprintf(out, "%s · %s · range %s · %s\n\n", cfg.Title, cfg.groupTitle(g), r.name, time.Now().Format("2006-01-02 15:04"))
 	for i, p := range ps {
 		m := ms[i]
@@ -124,6 +124,9 @@ type tileJSON struct {
 	Series   []seriesJSON `json:"series,omitempty"`
 	Bars     []bar        `json:"bars,omitempty"`
 	Lines    []string     `json:"lines,omitempty"`
+	Span     [2]int       `json:"span"`
+	Split    bool         `json:"split,omitempty"`
+	Events   []event      `json:"events,omitempty"`
 }
 type seriesJSON struct {
 	Name string    `json:"name"`
@@ -133,7 +136,7 @@ type seriesJSON struct {
 
 func toTile(p page, m model) tileJSON {
 	t := tileJSON{ID: p.ID, Title: p.Title, Subtitle: p.Subtitle, Kind: m.kind, Unit: m.unit, Fixed: p.Range, Note: m.note,
-		YMin: m.yMin, YMax: m.yMax, Thermal: m.thermal, Stack: m.stack, Refs: m.refs, Bars: m.bars, Lines: m.lines, Step: m.step.Seconds()}
+		YMin: m.yMin, YMax: m.yMax, Thermal: m.thermal, Stack: m.stack, Refs: m.refs, Bars: m.bars, Lines: m.lines, Step: m.step.Seconds(), Span: p.Span, Split: m.split, Events: m.events}
 	if m.err != nil {
 		t.Err = m.err.Error()
 	}

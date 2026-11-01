@@ -64,7 +64,7 @@ func main() {
 		ps := cfg.pages()
 		p := ps[min(*dump-1, len(ps)-1)]
 		r, _ := rangeByName(cfg.DefaultRange)
-		th := themeByID(cfg.DefaultTheme)
+		th := themeByID(map[bool]string{true: "carbon", false: cfg.DefaultTheme}[cfg.DefaultTheme == "auto"])
 		if env := os.Getenv("ASKEE_THEME"); env != "" {
 			th = themeByID(env)
 		}
