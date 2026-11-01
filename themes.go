@@ -49,20 +49,7 @@ var thermalStops = []string{"#3b4cc0", "#5e8fd8", "#8cc3c7", "#e9d38b", "#f19a5b
 var dashPatterns = [][]float64{{}, {7, 4}, {1.5, 3.5}, {9, 3, 2, 3}, {14, 5}, {3, 3}}
 
 var themes = []Theme{
-	// ── favourites first, flat and chalky ────────────────────────────────────────────────
-	{ID: "ember", Name: "Ember", Status: "validated", Style: "flat", Note: "copper lead on dark umber",
-		Surface: "#120f0c", Panel: "#17130f", Border: "#362d24", Grid: "#241e18", Text: "#f3ece4", Dim: "#a99c8c", Title: "#f0a070", Accent: "#d46a34",
-		Palette: []string{"#d46a34", "#0d9298", "#b88a01", "#b25196", "#47944c", "#6079d3", "#b9454c", "#2c9a88"}},
-	{ID: "fjord", Name: "Fjord", Status: "validated", Style: "flat", Note: "Nord-like slate, muted",
-		Surface: "#161a22", Panel: "#1b2029", Border: "#323a48", Grid: "#232935", Text: "#e5e9f0", Dim: "#9aa3b2", Title: "#88c0d0", Accent: "#c48225",
-		Palette: []string{"#2e97ca", "#c48225", "#3aa273", "#8d6cc2", "#c6585d", "#06999a", "#949523", "#b55d92"}},
-	{ID: "ember-chalk", Name: "Ember chalk", Status: "validated", Style: "flat", Note: "Ember softened toward chalk: lower chroma, warm grey ground",
-		Surface: "#191714", Panel: "#1e1b18", Border: "#3a342d", Grid: "#2a2621", Text: "#ece6dc", Dim: "#a59c90", Title: "#e0a07e", Accent: "#ce7951",
-		Palette: []string{"#ce7951", "#03999f", "#b2912e", "#af6297", "#569859", "#5d7dc8", "#b75357", "#22a68b"}},
-	{ID: "chalkboard", Name: "Chalkboard", Status: "floor", Style: "flat", Note: "chalk on slate green; colour-blind ΔE in the 6–8 band, so lines also differ by style",
-		Dashed: true, Surface: "#1a231e", Panel: "#1f2a24", Border: "#3b4a41", Grid: "#2a3630", Text: "#e8ece4", Dim: "#a3ae9f", Title: "#e6d9a2", Accent: "#c86265",
-		Palette: []string{"#ac942f", "#2a98c4", "#c86265", "#9175c1", "#39a57e", "#b36d2a", "#4c77bd", "#b4608a"}},
-	// ── print: one ink, line styles carry identity ───────────────────────────────────────
+	// ── print first: one ink, line styles carry identity (auto picks newsprint / carbon) ───────────────────────────────────────
 	{ID: "newsprint", Name: "Newsprint", Status: "mono", Style: "flat", Mono: true, Light: true, Note: "greyscale on newsprint; dashes, dots and dash-dots tell the lines apart",
 		Surface: "#e9e7e1", Panel: "#f1efea", Border: "#b9b5ab", Grid: "#dcd8cf", Text: "#1d1c1a", Dim: "#6b6860", Title: "#1d1c1a", Accent: "#1d1c1a",
 		Palette: []string{"#1d1c1a", "#3c3a36", "#5a5751", "#76736b", "#2a2926", "#4a4843"}},
@@ -78,6 +65,19 @@ var themes = []Theme{
 	{ID: "amber", Name: "Amber", Status: "mono", Style: "flat", Mono: true, Note: "amber CRT: one phosphor, line styles",
 		Surface: "#0d0802", Panel: "#130c03", Border: "#3d2a0d", Grid: "#22180a", Text: "#ffc46b", Dim: "#a87a35", Title: "#ffd28a", Accent: "#ffe0a8",
 		Palette: []string{"#ffb84d", "#e09a2e", "#c0801f", "#9c6614", "#ffcc77", "#f0a83c"}},
+	// ── favourites first, flat and chalky ────────────────────────────────────────────────
+	{ID: "ember", Name: "Ember", Status: "validated", Style: "flat", Note: "copper lead on dark umber",
+		Surface: "#120f0c", Panel: "#17130f", Border: "#362d24", Grid: "#241e18", Text: "#f3ece4", Dim: "#a99c8c", Title: "#f0a070", Accent: "#d46a34",
+		Palette: []string{"#d46a34", "#0d9298", "#b88a01", "#b25196", "#47944c", "#6079d3", "#b9454c", "#2c9a88"}},
+	{ID: "fjord", Name: "Fjord", Status: "validated", Style: "flat", Note: "Nord-like slate, muted",
+		Surface: "#161a22", Panel: "#1b2029", Border: "#323a48", Grid: "#232935", Text: "#e5e9f0", Dim: "#9aa3b2", Title: "#88c0d0", Accent: "#c48225",
+		Palette: []string{"#2e97ca", "#c48225", "#3aa273", "#8d6cc2", "#c6585d", "#06999a", "#949523", "#b55d92"}},
+	{ID: "ember-chalk", Name: "Ember chalk", Status: "validated", Style: "flat", Note: "Ember softened toward chalk: lower chroma, warm grey ground",
+		Surface: "#191714", Panel: "#1e1b18", Border: "#3a342d", Grid: "#2a2621", Text: "#ece6dc", Dim: "#a59c90", Title: "#e0a07e", Accent: "#ce7951",
+		Palette: []string{"#ce7951", "#03999f", "#b2912e", "#af6297", "#569859", "#5d7dc8", "#b75357", "#22a68b"}},
+	{ID: "chalkboard", Name: "Chalkboard", Status: "floor", Style: "flat", Note: "chalk on slate green; colour-blind ΔE in the 6–8 band, so lines also differ by style",
+		Dashed: true, Surface: "#1a231e", Panel: "#1f2a24", Border: "#3b4a41", Grid: "#2a3630", Text: "#e8ece4", Dim: "#a3ae9f", Title: "#e6d9a2", Accent: "#c86265",
+		Palette: []string{"#ac942f", "#2a98c4", "#c86265", "#9175c1", "#39a57e", "#b36d2a", "#4c77bd", "#b4608a"}},
 	// ── smooth: gradient washes and ramps ───────────────────────────────────────────────
 	{ID: "reference", Name: "Reference", Status: "validated", Style: "smooth", Note: "a validated reference dark palette — the safest default",
 		Surface: "#131312", Panel: "#1a1a19", Border: "#33332f", Grid: "#262624", Text: "#f0efec", Dim: "#a3a29a", Title: "#f0efec", Accent: "#d95926",

@@ -138,6 +138,8 @@ func fmtVal(v float64) string {
 		return fmt.Sprintf("%.2fM", v/1e6)
 	case a >= 1e4:
 		return fmt.Sprintf("%.1fk", v/1e3)
+	case a >= 1000:
+		return fmt.Sprintf("%d,%03d", int(v)/1000, int(math.Abs(v))%1000) // thousands separator (Wei)
 	case a >= 100:
 		return fmt.Sprintf("%.0f", v)
 	case a >= 10:
@@ -212,10 +214,49 @@ var dashMasks = [][]bool{
 // legendGlyph shows the line style beside a mono legend entry.
 var legendGlyph = []string{"━━", "╍╍", "┈┈", "─·", "━ ", "╌╌"}
 
+// drawSplit draws small multiples: one band per series, each on its own scale and named at its
+// right end, sharing one time axis at the bottom.
+func drawSplit(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64) {
+	n := len(m.series)
+	inner := y1 - y0 - 2 // rows between the borders, less one for the time axis
+	h := inner / n
+	for i, se := range m.series {
+		sub := m
+		sub.series, sub.refs, sub.split = []series{se}, nil, false
+		if i > 0 {
+			sub.events = nil
+		}
+		top := y0 + i*h
+		bot := top + h + 1
+		last := i == n-1
+		if last {
+			bot = y1
+		}
+		drawLineArea(s, sub, x0, top, x1, bot, thermal, last)
+		if k := len(se.v); k > 0 {
+			lbl := " " + se.name + " " + fmtVal(se.v[k-1]) + m.unit + " "
+			s.text(x1-1-len([]rune(lbl)), top+1, lbl, s.th.Text, false)
+		}
+	}
+}
+
 func drawLine(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64) []legendItem {
+	if m.split && len(m.series) > 1 {
+		drawSplit(s, m, x0, y0, x1, y1, thermal)
+		return nil
+	}
+	return drawLineArea(s, m, x0, y0, x1, y1, thermal, true)
+}
+
+// drawLineArea draws one panel. The y axis is a range frame (Tufte): ticks only at the data's
+// own min and max, no grid; a fixed scale end (0, 100 %) is stated once, dimmer.
+func drawLineArea(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64, xAxis bool) []legendItem {
 	th := s.th
 	gut := 8
 	px0, py0, px1, py1 := x0+gut, y0+1, x1-1, y1-2
+	if !xAxis {
+		py1 = y1 - 1
+	}
 	pw, ph := px1-px0, py1-py0+1
 	if pw < 4 || ph < 2 {
 		return nil
@@ -230,13 +271,49 @@ func drawLine(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64) []lege
 		return nil
 	}
 	Y := func(v float64) int { return py0 + int((1-(v-lo)/(hi-lo))*float64(ph-1)+0.5) }
-	// grid: three faint rules with labels (recessive)
-	for _, f := range []float64{1, 0.5, 0} {
-		v := lo + f*(hi-lo)
+	dlo, dhi := math.Inf(1), math.Inf(-1)
+	for _, se := range ss {
+		for _, v := range se.v {
+			dlo, dhi = math.Min(dlo, v), math.Max(dhi, v)
+		}
+	}
+	tick := func(v float64, ink string) {
 		y := Y(v)
 		lbl := fmtVal(v)
-		s.text(px0-1-len([]rune(lbl)), y, lbl, th.Dim, false)
+		s.text(px0-1-len([]rune(lbl)), y, lbl, ink, false)
 		s.set(px0-1, y, '┤', th.Border, false)
+	}
+	for y := Y(dhi); y <= Y(dlo); y++ {
+		s.set(px0-1, y, '│', th.Border, false)
+	}
+	if m.yMin != nil && Y(lo) > Y(dlo)+1 {
+		tick(lo, th.Dim)
+	}
+	if m.yMax != nil && Y(hi) < Y(dhi)-1 {
+		tick(hi, th.Dim)
+	}
+	tick(dhi, th.Text)
+	if Y(dlo) > Y(dhi) {
+		tick(dlo, th.Text)
+	}
+	// events (reboots): a dotted hairline and a word, drawn under the data
+	t0e, t1e := float64(m.start.Unix()), float64(m.end.Unix())
+	lastX := -99
+	var evLabels []legendItem
+	var evX []int
+	for _, e := range m.events {
+		if e.T < t0e || e.T > t1e {
+			continue
+		}
+		x := px0 + int((e.T-t0e)/(t1e-t0e)*float64(pw-1))
+		for y := py0; y <= py1; y++ {
+			s.set(x, y, '┊', th.Dim, false)
+		}
+		if x-lastX > len(e.Label)+2 && x+len(e.Label) < px1 {
+			evLabels = append(evLabels, legendItem{e.Label, ""})
+			evX = append(evX, x)
+			lastX = x
+		}
 	}
 	// reference lines ("compared to what"): dashed, dim, labelled at the right
 	for _, r := range m.refs {
@@ -324,7 +401,10 @@ func drawLine(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64) []lege
 			s.set(px0+i%pw, py0+i/pw, rune(0x2800+int(dots[i])), c, false)
 		}
 	}
-	for _, r := range m.refs { // labels last, so data never overprints them
+	for i, l := range evLabels { // labels last, so data never overprints them
+		s.text(evX[i]+1, py0, l.text, th.Dim, false)
+	}
+	for _, r := range m.refs {
 		lbl := " " + r.Label + " " + fmtVal(r.V) + m.unit + " "
 		s.text(px1-len([]rune(lbl)), Y(r.V), lbl, th.Dim, false)
 	}
@@ -333,6 +413,9 @@ func drawLine(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64) []lege
 		layout = "02 Jan"
 	}
 	for _, f := range []float64{0, 0.5, 1} {
+		if !xAxis {
+			break
+		}
 		t := m.start.Add(time.Duration(f * float64(m.end.Sub(m.start))))
 		lbl := t.Format(layout)
 		x := px0 + int(f*float64(pw-1)) - len(lbl)/2
@@ -465,9 +548,6 @@ func panel(s *screen, cfg *Config, p page, m model, x0, y0, x1, y1 int, rangeNam
 		tag = p.Range
 	}
 	sub := "[" + tag + "]"
-	if p.Subtitle != "" {
-		sub += " " + p.Subtitle
-	}
 	switch {
 	case m.err != nil:
 		s.box(x0, y0, x1, y1, title, sub, nil)
@@ -475,7 +555,7 @@ func panel(s *screen, cfg *Config, p page, m model, x0, y0, x1, y1 int, rangeNam
 	case m.kind == "line":
 		leg := drawLine(s, m, x0, y0, x1, y1, cfg.Thermal)
 		s.box(x0, y0, x1, y1, title, sub, leg)
-		if st := statsLine(m); st != "" {
+		if st := statsLine(m); st != "" && !m.split {
 			s.text(x1-1-len([]rune(st)), y1, st, th.Dim, false)
 		}
 	case m.kind == "bars":
@@ -581,6 +661,12 @@ func (d *deck) render(w, h int) *screen {
 		s.box(0, 1, w-1, h-3, p.Title, "", nil)
 		s.text(3, 3, "loading…", th.Dim, false)
 	} else {
+		// live: on short ranges the window slides with the clock every second, the way btm
+		// scrolls; new samples arrive with each refetch (every 15 s, the scrape is 30 s)
+		if m.kind == "line" && p.Range == "" && ranges[d.ri].span <= time.Hour && !m.end.IsZero() {
+			shift := time.Since(m.end)
+			m.start, m.end = m.start.Add(shift), m.end.Add(shift)
+		}
 		panel(s, d.cfg, p, m, 0, 1, w-1, h-3, ranges[d.ri].name)
 	}
 	prev, next := "", ""
@@ -592,7 +678,7 @@ func (d *deck) render(w, h int) *screen {
 	}
 	s.text(1, h-2, prev, th.Dim, false)
 	s.text(w-1-len([]rune(next)), h-2, next, th.Dim, false)
-	help := "←/→ or click: page   ↑/↓ or 1-6: range   t: theme   r: refresh   q: quit"
+	help := "←/→ or click: page   ↑/↓ or 1-7: range   t: theme   r: refresh   q: quit"
 	s.text((w-len([]rune(help)))/2, h-1, help, th.Border, false)
 	return s
 }
@@ -607,8 +693,15 @@ func runDeck(cfg *Config, startPage int) error {
 			}
 		}
 	}
+	want := cfg.DefaultTheme
+	if want == "auto" { // a terminal cannot be asked; COLORFGBG (set by many) says "fg;bg"
+		want = "carbon"
+		if bg := os.Getenv("COLORFGBG"); strings.HasSuffix(bg, ";15") || strings.HasSuffix(bg, ";7") {
+			want = "newsprint"
+		}
+	}
 	for i, t := range themes {
-		if t.ID == cfg.DefaultTheme {
+		if t.ID == want {
 			d.ti = i
 		}
 	}
@@ -731,7 +824,7 @@ func runDeck(cfg *Config, startPage int) error {
 				case 'r':
 					d.load(true, redraw)
 				default:
-					if k[0] >= '1' && k[0] <= '6' {
+					if k[0] >= '1' && k[0] <= '7' {
 						d.ri = int(k[0] - '1')
 					}
 				}
