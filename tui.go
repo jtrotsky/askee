@@ -594,7 +594,11 @@ func (d *deck) get() (model, bool, bool) {
 	defer d.mu.Unlock()
 	k := d.key()
 	m, ok := d.cache[k]
-	return m, ok, ok && time.Since(d.when[k]) < 15*time.Second
+	r := ranges[d.ri]
+	if d.pages[d.cur].Range != "" {
+		r, _ = rangeByName(d.pages[d.cur].Range)
+	}
+	return m, ok, ok && time.Since(d.when[k]) < ttl(r) // the same cadence as the web face
 }
 
 func (d *deck) load(force bool, redraw chan<- struct{}) {
@@ -612,7 +616,14 @@ func (d *deck) load(force bool, redraw chan<- struct{}) {
 	go func() {
 		m := p.fetch(r)
 		d.mu.Lock()
-		d.cache[k], d.when[k], d.busy = m, time.Now(), false
+		if old, ok := d.cache[k]; ok && m.err != nil && old.err == nil {
+			// keep the last good chart, say how old it is, and retry on the next tick
+			old.note = joinNote(fmt.Sprintf("as of %s — %v", d.when[k].Format("15:04:05"), m.err), "")
+			m = old
+			d.cache[k], d.busy = m, false
+		} else {
+			d.cache[k], d.when[k], d.busy = m, time.Now(), false
+		}
 		d.mu.Unlock()
 		redraw <- struct{}{}
 	}()
@@ -661,12 +672,8 @@ func (d *deck) render(w, h int) *screen {
 		s.box(0, 1, w-1, h-3, p.Title, "", nil)
 		s.text(3, 3, "loading…", th.Dim, false)
 	} else {
-		// live: on short ranges the window slides with the clock every second, the way btm
-		// scrolls; new samples arrive with each refetch (every 15 s, the scrape is 30 s)
-		if m.kind == "line" && p.Range == "" && ranges[d.ri].span <= time.Hour && !m.end.IsZero() {
-			shift := time.Since(m.end)
-			m.start, m.end = m.start.Add(shift), m.end.Add(shift)
-		}
+		// live, as btm does it: the chart does not slide between samples. Each refetch repaints
+		// it with the right edge at the newest sample, so it changes in one step or not at all.
 		panel(s, d.cfg, p, m, 0, 1, w-1, h-3, ranges[d.ri].name)
 	}
 	prev, next := "", ""

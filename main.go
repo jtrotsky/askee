@@ -18,9 +18,9 @@ import (
 )
 
 func main() {
-	cfgPath := flag.String("config", "askee.json", "page catalogue (JSON)")
+	cfgPath := flag.String("config", "", "page catalogue (JSON); default: $ASKEE_CONFIG, ./askee.json, ~/.config/askee/askee.json, /usr/local/etc/askee/askee.json")
 	printG := flag.String("print", "", "print one group as plain text and exit")
-	rangeF := flag.String("range", "", "range for -print (1h 6h 24h 7d 30d 90d; default from config)")
+	rangeF := flag.String("range", "", "range for -print (live 1h 6h 24h 7d 30d 90d; default from config)")
 	serveA := flag.String("serve", "", "serve the web dashboard on this address")
 	dump := flag.Int("dump", 0, "render page N once to stdout and exit")
 	size := flag.String("size", "100x14", "width x height for -print and -dump")
@@ -34,7 +34,15 @@ func main() {
 		}
 		return
 	}
-	cfg, err := loadConfig(*cfgPath)
+	path := *cfgPath
+	if path == "" {
+		path = findConfig()
+	}
+	if path == "" {
+		fmt.Fprintln(os.Stderr, "askee: no config. Pass -config FILE, set ASKEE_CONFIG, or put one at ~/.config/askee/askee.json")
+		os.Exit(1)
+	}
+	cfg, err := loadConfig(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "askee:", err)
 		os.Exit(1)
@@ -79,4 +87,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+// findConfig looks where a person would put the catalogue, so a plain `askee` just works.
+func findConfig() string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{os.Getenv("ASKEE_CONFIG"), "askee.json",
+		home + "/.config/askee/askee.json", "/usr/local/etc/askee/askee.json"} {
+		if p == "" {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
 }

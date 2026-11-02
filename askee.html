@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>askee</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
   /* Every colour is a role variable set from the active theme (/api/meta), so the eight
      themes swap in one place and match the terminal deck exactly. */
@@ -128,6 +129,7 @@ function spanOf(t, g) {
   if (!r) {   // automatic height: enough rows for the content at a readable size
     const chrome = 48;   // title and footer
     const need = t.kind === "bars" ? chrome + (t.bars || []).length * BAR_ROW
+               : t.kind === "blocks" ? chrome + 18 + (t.blocks || []).length * ((t.blocks || []).some(b => !b.total) ? 40 : 28)
                : t.kind === "text" ? chrome + (t.lines || []).length * TEXT_ROW : 0;
     r = need ? Math.ceil((need + GAP) / (g.cellH + GAP)) : 1;
   }
@@ -181,6 +183,14 @@ function spread(items, top, bot, h) {   // nudge end labels apart; keep them ins
   return items;
 }
 const lastOf = s => s.v[s.v.length - 1];
+// niceTicks: 3–5 round values covering [lo, hi] — steps of 1, 2, 2.5 or 5 × 10^k
+function niceTicks(lo, hi, n) {
+  const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(st => st >= raw);
+  const out = [];
+  for (let v = Math.floor(lo / step) * step; v <= hi + step * 0.999; v += step) out.push(+v.toPrecision(12));
+  return out;
+}
 function endText(t, s, n) { return (n === 1 ? "" : s.name + " ") + fmt(lastOf(s)) + (t.unit || ""); }
 function sample(c, x, y, col, dash, band) {  // the line's own style, so a label needs no colour
   c.save();
@@ -190,7 +200,6 @@ function sample(c, x, y, col, dash, band) {  // the line's own style, so a label
 }
 function bandFill(c, col, i, T, ph) {
   if (TH.mono) return alpha(col, .10 + .12 * (i % 4));          // solid grey tints, never hatching
-  if (TH.style === "smooth") { const g = c.createLinearGradient(0, T, 0, T + ph); g.addColorStop(0, alpha(col, .75)); g.addColorStop(1, alpha(col, .45)); return g; }
   return alpha(col, .62);
 }
 
@@ -202,23 +211,41 @@ function panel(c, t, raw, b, opts) {
   if (!isFinite(dlo)) return null;
   let lo = dlo, hi = dhi;
   if (!opts.split) for (const r of t.refs || []) { lo = Math.min(lo, r.value); hi = Math.max(hi, r.value); }
-  if (t.ymin != null) lo = Math.min(lo, t.ymin); else { const p = (hi - lo)*0.08 || Math.max(1, Math.abs(hi)*0.1); lo -= p; }
-  if (t.ymax != null) { hi = Math.max(hi, t.ymax); if (t.ymax === 100) hi = Math.min(hi, 100); } else hi += (hi - lo)*0.06;
-  if (hi <= lo) hi = lo + 1;
   const {L, T, pw, ph} = b;
-  const X = ts => L + (ts - t.start) / (t.end - t.start) * pw, Y = v => T + (1 - (v - lo)/(hi - lo)) * ph;
-  // range frame: the axis is drawn only where the data is, and says where that is
+  const X = ts => L + (ts - t.start) / (t.end - t.start) * pw;
+  let Y, ticks;
+  if (t.log) {
+    // log scale: latency and the like span orders of magnitude; equal steps are equal ratios
+    lo = Math.max(Math.min(lo, ...S.flatMap(s => s.v.filter(v => v > 0))), 1e-3);
+    lo = Math.pow(10, Math.floor(Math.log10(lo))); hi = Math.pow(10, Math.ceil(Math.log10(Math.max(hi, lo * 10))));
+    const l0 = Math.log10(lo), l1 = Math.log10(hi);
+    Y = v => T + (1 - (Math.log10(Math.max(v, lo)) - l0) / (l1 - l0)) * ph;
+    ticks = []; for (let e = l0; e <= l1 + 1e-9; e++) ticks.push(Math.pow(10, e));
+  } else {
+    if (t.ymin != null) lo = Math.min(lo, t.ymin);
+    if (t.ymax != null) { hi = Math.max(hi, t.ymax); if (t.ymax === 100) hi = Math.min(hi, 100); }
+    if (hi <= lo) { hi = lo + 1; lo = lo - 1; }
+    // round the scale out to tick values, so the axis reads in whole steps
+    ticks = niceTicks(lo, hi, opts.split ? 2 : ph > 140 ? 4 : 3);
+    lo = Math.min(lo, ticks[0]); hi = Math.max(hi, ticks[ticks.length - 1]);
+    Y = v => T + (1 - (v - lo)/(hi - lo)) * ph;
+  }
+  // range frame: the axis line runs only where the data is; the numbers are whole steps
   const ax = L - 5;
   c.strokeStyle = TH.vars[5]; c.lineWidth = 1; c.setLineDash([]);
   c.beginPath(); c.moveTo(ax + .5, Math.round(Y(dhi))); c.lineTo(ax + .5, Math.round(Y(dlo)) + 1); c.stroke();
-  c.textAlign = "right"; c.fillStyle = TH.vars[4];
-  const yHi = Y(dhi), yLo = Y(dlo);
-  c.fillText(fmt(dhi), ax - 4, yHi);
-  if (yLo - yHi > 12) c.fillText(fmt(dlo), ax - 4, yLo);
-  // a fixed scale (0–100 %, zero baseline) is stated once, quietly, where it does not collide
-  c.fillStyle = TH.vars[5];
-  if (t.ymin != null && Y(lo) - yLo > 12) c.fillText(fmt(lo), ax - 4, Y(lo));
-  if (t.ymax != null && yHi - Y(hi) > 12) c.fillText(fmt(hi), ax - 4, Y(hi));
+  c.textAlign = "right"; c.fillStyle = TH.vars[5];
+  let lastY = Infinity;
+  // a tick shows as many decimals as its step needs: 0, 10, 20 — not 0.00, 10.0, 20.0
+  const st = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : 1;
+  const tf = v => t.log || Math.abs(v) >= 1e4 ? fmt(v) : v.toLocaleString("en-NZ", {maximumFractionDigits: Math.max(0, -Math.floor(Math.log10(st) + 1e-9)) + (st / Math.pow(10, Math.floor(Math.log10(st))) === 2.5 ? 1 : 0)});
+  ticks.forEach((v, i) => {
+    const y = Y(v); if (lastY - y < 12) return;
+    c.fillRect(ax - 3, Math.round(y), 3, 1);
+    // the unit rides on the top number only: "2,000 ms", not a column of "ms"
+    const top = i === ticks.length - 1 && u && c.measureText(tf(v) + " " + u).width < L - 10;
+    c.fillText(top ? tf(v) + " " + u : tf(v), ax - 5, y); lastY = y;
+  });
   const labels = [];
   // reference lines: "compared to what" — dashed, recessive, named at the right end
   if (!opts.split) {
@@ -269,12 +296,6 @@ function panel(c, t, raw, b, opts) {
     S.forEach((s, i) => {
       if (!s.v.length) return;
       const col = colOf(i), dash = opts.split ? [] : dashOf(i);
-      if (TH.style === "smooth" && S.length <= 2) {   // soft gradient wash: smooth themes only
-        const g = c.createLinearGradient(0, T, 0, T + ph);
-        if (t.thermal && !TH.mono) { [0, .5, 1].forEach(f => g.addColorStop(f, alpha(thermalAt(hi - (hi - lo)*f), .22 - .18*f))); }
-        else { g.addColorStop(0, alpha(col, .30)); g.addColorStop(1, alpha(col, 0)); }
-        c.fillStyle = g; path(s, true); c.fill();
-      }
       c.lineWidth = 2; c.lineJoin = "round"; c.setLineDash(dash);
       if (t.thermal && !TH.mono) {      // the line itself carries temperature: each segment coloured by value
         for (let k = 1; k < s.t.length; k++) {
@@ -310,7 +331,7 @@ function drawLine(cv, t) {
   const [c, W, H] = setup(cv);
   const S = t.series || [];
   const ev = (t.events || []).some(e => e.t >= t.start && e.t <= t.end);
-  const L = 46, T = ev ? 22 : 8, B = 20, R = marginFor(c, t, W), pw = W - L - R, ph = H - T - B;
+  const L = 58, T = ev ? 22 : 8, B = 20, R = marginFor(c, t, W), pw = W - L - R, ph = H - T - B;
   if (!S.some(s => s.v.length)) { c.fillStyle = TH.vars[5]; c.fillText("no data in this range", L + 8, T + ph/2); return null; }
   const xLabels = () => {
     c.fillStyle = TH.vars[5];
@@ -342,45 +363,139 @@ function drawBars(cv, t) {
   // rows never shrink below a readable height; if they still do not fit, the tile scrolls
   const rowH = Math.max(BAR_ROW, Math.min(26, (H - 6) / bars.length));
   const lw = Math.min(W*0.42, Math.max(...bars.map(b => c.measureText(b.label).width)) + 12);
-  const max = Math.max(...bars.map(b => b.value), t.unit === "%" ? 100 : 0) || 1, vw = 76, bw = W - lw - vw - 14;  // % is drawn against 100
+  const refs = t.refs || [];
+  const max = Math.max(...bars.map(b => b.value), ...refs.map(r => r.value), t.unit === "%" ? 100 : 0) || 1, vw = 76, bw = W - lw - vw - 14;  // % is drawn against 100
   const geo = [];
   bars.forEach((b, i) => {
     const y = 3 + i*rowH + rowH/2, f = b.value / max, len = Math.max(2, f*bw), bh = rowH*0.62;
     c.fillStyle = TH.vars[4]; c.textAlign = "right"; c.fillText(b.label, lw, y);
-    // magnitude gradient: the bar's own end colour is its value on the theme's one-hue ramp
-    if (TH.style === "smooth") {
-      const g = c.createLinearGradient(lw + 6, 0, lw + 6 + bw, 0);
-      g.addColorStop(0, SEQ[0]); g.addColorStop(1, SEQ[SEQ.length - 1]); c.fillStyle = g;
-    } else c.fillStyle = TH.mono ? alpha(PAL[0], .85) : PAL[0];
-    c.beginPath();
-    if (c.roundRect) c.roundRect(lw + 6, y - bh/2, len, bh, [0, 4, 4, 0]); else c.rect(lw + 6, y - bh/2, len, bh);
-    c.fill();
+    cells(c, lw + 6, y - bh/2, len, bh, TH.mono ? alpha(PAL[0], .85) : PAL[0]);
     c.fillStyle = TH.vars[4]; c.textAlign = "left"; c.fillText(fmt(b.value) + " " + (t.unit || ""), lw + 12 + len, y);
     geo.push({y0: y - rowH/2, y1: y + rowH/2, b});
   });
+  // compared to what: a reference value is a dashed rule down every bar, named once
+  for (const r of refs) {
+    const x = Math.round(lw + 6 + r.value / max * bw) + .5;
+    c.save(); c.strokeStyle = TH.vars[5]; c.setLineDash([3, 3]); c.beginPath(); c.moveTo(x, 0); c.lineTo(x, 3 + bars.length * rowH); c.stroke(); c.restore();
+    c.fillStyle = TH.vars[5]; c.textAlign = "right"; c.fillText(`${r.label} ${fmt(r.value)} ${t.unit || ""}`, x - 4, 3 + bars.length * rowH - 6);
+  }
   return geo;
 }
 
-// live: on 15m and 1h the plot window slides with the clock every second (btm-style); the data
-// itself refreshes every 15 s. Only the canvases are redrawn, so hover and layout stay put.
-let live = [];
-const isLive = () => range === "15m" || range === "1h";
-setInterval(() => {
-  if (!isLive() || !live.length) return;
-  const now = Date.now() / 1000;
-  for (const L of live) {
-    if (L.t.fixed) continue;
-    const span = L.t.end - L.t.start; L.t.end = now; L.t.start = now - span;
-    const g = drawLine(L.cv, L.t); if (g) Object.assign(L.g, g);
+// Block style, shared by every horizontal bar: a bar is a run of small cells with a gap
+// between them, like a row of █ in the terminal and in the report kit. The last cell is cut
+// to length, so the bar is still exact. CELL is the cell pitch in px.
+const CELL = 8;
+function cells(c, x, y, w, h, fill, from = 0) {
+  c.fillStyle = fill;
+  for (let cx = Math.floor(from / CELL) * CELL; cx < from + w; cx += CELL) {
+    const a = Math.max(cx, from), b = Math.min(cx + CELL - 2, from + w);
+    if (b > a) c.fillRect(x - from + a, y, b - a, h);   // x is where this run starts; cells align to the bar's grid
   }
-}, 1000);
+}
+
+// drawBlocks: one row per thing, each a block bar. With `total` (capacity) the row is the
+// whole and the free part is drawn as empty cells; otherwise rows share one scale and are
+// split into named segments, named under the bar where they fit.
+function drawBlocks(cv, t) {
+  const rows = t.blocks || [];
+  const segRows = rows.some(r => !r.total);
+  const rowH = segRows ? 40 : 28;
+  const need = 8 + rows.length * rowH + (t.refs && t.refs.length ? 14 : 0);
+  if (need > cv.parentElement.clientHeight) cv.style.height = need + "px";
+  const [c, W, H] = setup(cv);
+  if (!rows.length) { c.fillStyle = TH.vars[5]; c.fillText("no data", 10, 14); return null; }
+  const lw = Math.min(W * 0.3, Math.max(...rows.map(r => c.measureText(r.label).width)) + 12);
+  const tw = Math.min(W * 0.3, Math.max(...rows.map(r => c.measureText(r.text).width)) + 12);
+  const bx = lw + 6, bw = W - bx - tw - 6;
+  const sum = r => r.segs.reduce((a, s) => a + s.v, 0);
+  const max = Math.max(...rows.map(r => r.total || sum(r))) || 1;
+  const top = t.refs && t.refs.length ? 14 : 4, geo = [];
+  // a capacity reference (e.g. "ZFS slows past 80 %"): one dashed rule through every row
+  for (const r of (rows.every(x => x.total) ? t.refs || [] : [])) {
+    const x = Math.round(bx + bw * r.value / 100) + .5;
+    c.save(); c.strokeStyle = TH.vars[5]; c.setLineDash([3, 3]); c.beginPath(); c.moveTo(x, top - 2); c.lineTo(x, top + rows.length * rowH); c.stroke(); c.restore();
+    c.fillStyle = TH.vars[5]; c.textAlign = "center"; c.fillText(`${r.label} ${Math.round(r.value)} %`, x, 6);
+  }
+  rows.forEach((r, i) => {
+    const y = top + i * rowH, bh = 14, yb = y + 3;
+    c.textAlign = "right"; c.fillStyle = TH.vars[4]; c.fillText(r.label, lw, yb + bh / 2);
+    const scale = r.total ? bw / r.total : bw / max;
+    if (r.total) cells(c, bx, yb, bw, bh, TH.vars[3]);        // the whole, as empty cells
+    let x0 = 0;
+    r.segs.forEach((sg, k) => {
+      const w = sg.v * scale; if (w <= 0) return;
+      const col = r.total ? PAL[0] : (TH.mono ? alpha(PAL[0], .9 - .14 * k) : PAL[k % PAL.length]);
+      cells(c, bx + x0, yb, w, bh, col, x0);
+      if (segRows && !r.total) {                     // name each segment under itself, if it fits
+        const name = sg.name, nw = c.measureText(name).width;
+        if (nw + 4 < w) { c.fillStyle = TH.vars[5]; c.textAlign = "left"; c.fillText(name, bx + x0, yb + bh + 9); }
+      }
+      x0 += w;
+    });
+    c.textAlign = "left"; c.fillStyle = TH.vars[4]; c.fillText(r.text, bx + (r.total ? bw : x0) + 8, yb + bh / 2);
+    geo.push({y0: y, y1: y + rowH, r});
+  });
+  return geo;
+}
+function hoverBlocks(el, cv, t, geo) {
+  const tip = el.querySelector(".tip");
+  cv.addEventListener("mousemove", e => {
+    const y = e.clientY - cv.getBoundingClientRect().top, hit = geo.find(g => y >= g.y0 && y < g.y1);
+    if (!hit) { tip.style.display = "none"; return; }
+    const r = hit.r, u = t.unit || "";
+    const lines = r.segs.filter(s => s.v > 0).map(s => `${s.name} ${fmt(s.v)} ${u}`);
+    if (r.total) lines.push(`free ${fmt(r.total - r.segs[0].v)} ${u}`);
+    tipAt(el, tip, e, cv, `<b>${r.label}</b> ${r.text}<br>` + lines.join("<br>"));
+  });
+  cv.addEventListener("mouseleave", () => tip.style.display = "none");
+}
+
+// Live, the way btm does it: nothing slides between samples. Each refetch (every 5 s on the
+// live range) repaints the charts IN PLACE — same tiles, same canvases, new ink — with the
+// window's right edge at the newest sample. So the picture changes in one step when there is
+// something new, and never drifts or flashes. Other ranges refetch on a slower cadence and
+// repaint the same way.
+const isLive = () => range === "live";
+const CADENCE = {live: 1000, "1h": 60000};
+let shown = {sig: "", tiles: []};
+function anchor(t) {
+  if (t.drawn !== "live" || !t.series) return;
+  let last = 0;
+  for (const s of t.series) if (s.t.length) last = Math.max(last, s.t[s.t.length - 1]);
+  if (last) { const span = t.end - t.start; t.end = last; t.start = last - span; }
+}
+// repaint: redraw every shown tile from the new data without touching the layout. Returns
+// false when the layout has to change (a tile appeared, errored or gained data) — the caller
+// then rebuilds.
+function repaint() {
+  for (const e of shown.tiles) {
+    const nt = data.tiles.find(x => x.id === e.id);
+    if (!nt || !!nt.err !== !!e.t.err || nt.kind !== e.kind || (!e.geo && !e.pre && !e.t.err)) return false;
+  }
+  for (const e of shown.tiles) {
+    const nt = data.tiles.find(x => x.id === e.id);
+    for (const k of Object.keys(e.t)) if (!(k in nt)) delete e.t[k];
+    Object.assign(e.t, nt);                  // hover handlers hold e.t, so they see the new data
+    if (e.t.err) continue;
+    anchor(e.t);
+    if (e.kind === "line") { const g = drawLine(e.cv, e.t); if (g) Object.assign(e.geo, g); }
+    else if (e.kind === "bars") { const g = drawBars(e.cv, e.t) || []; e.geo.splice(0, e.geo.length, ...g); }
+    else if (e.kind === "blocks") { const g = drawBlocks(e.cv, e.t) || []; e.geo.splice(0, e.geo.length, ...g); }
+    else if (e.pre) e.pre.textContent = (e.t.lines || []).join("\n");
+    e.foot.textContent = e.t.note || "";
+  }
+  return true;
+}
 
 function render() {
   if (!data || !TH) return;
-  live = [];
   const grid = $("grid"), g = geometry();
   pages = paginate(data.tiles, g);
   page = Math.min(page, pages.length - 1);
+  const sig = [cur, range, page, g.cols, g.cellH, TH.id, pages[page].map(p => data.tiles[p.i].id).join(",")].join("|");
+  if (sig === shown.sig && repaint()) { stamp(); return; }
+  shown = {sig, tiles: []};
   document.documentElement.style.setProperty("--cols", g.cols);
   document.documentElement.style.setProperty("--cellh", g.cellH + "px");
   grid.innerHTML = "";
@@ -393,7 +508,7 @@ function render() {
     el.innerHTML = `<h2></h2><div class="sub"></div><div class="body"></div><div class="foot"></div><div class="tip"></div>`;
     // the title says what, in a few words; the "so what" waits behind the (i) until asked for
     const h2 = el.querySelector("h2"); h2.textContent = t.title;
-    const sm = document.createElement("small"); sm.textContent = [t.unit, t.fixed || data.range].filter(Boolean).join(" · "); h2.append(sm);
+    const sm = document.createElement("small"); sm.textContent = [t.unit, t.fixed || t.drawn || data.range].filter(Boolean).join(" · "); h2.append(sm);
     if (t.subtitle) {
       const w = document.createElement("span"); w.className = "why"; w.textContent = "ⓘ"; w.tabIndex = 0;
       w.setAttribute("aria-label", t.subtitle); h2.append(w);
@@ -406,25 +521,38 @@ function render() {
     grid.appendChild(el);
     const body = el.querySelector(".body"), foot = el.querySelector(".foot");
     if (t.err) { body.innerHTML = `<div class="err"></div>`; body.firstChild.textContent = "error: " + t.err; continue; }
+    const entry = {id: t.id, kind: t.kind, t, foot, geo: null};
+    shown.tiles.push(entry);
     if (t.kind === "line") {
       const cv = document.createElement("canvas"); body.append(cv);
+      anchor(t);
       const geo = drawLine(cv, t);
       foot.textContent = t.note || "";
-      if (geo) { hoverLine(el, cv, t, geo); live.push({cv, t, g: geo}); }
+      if (geo) hoverLine(el, cv, t, geo);
+      Object.assign(entry, {cv, geo});
+    } else if (t.kind === "blocks") {
+      const cv = document.createElement("canvas"); body.append(cv);
+      const geo = drawBlocks(cv, t);
+      foot.textContent = t.note || "";
+      if (geo) hoverBlocks(el, cv, t, geo);
+      Object.assign(entry, {cv, geo});
     } else if (t.kind === "bars") {
       const cv = document.createElement("canvas"); body.append(cv);
       const geo = drawBars(cv, t);
       foot.textContent = t.note || "";
       if (geo) hoverBars(el, cv, t, geo);
+      Object.assign(entry, {cv, geo});
     } else {
       const pre = document.createElement("pre"); pre.textContent = (t.lines || []).join("\n"); body.append(pre);
       const longest = Math.max(1, ...(t.lines || []).map(l => [...l].length));
       pre.style.fontSize = Math.max(11, Math.min(13, (body.clientWidth - 20) / (longest * 0.62))) + "px";   // never below 11px: wide tables scroll sideways instead
       foot.textContent = t.note || "";
+      entry.pre = pre;
     }
   }
-  $("stamp").textContent = "updated " + new Date(data.generated*1000).toLocaleTimeString(undefined, {hour12:false});
+  stamp();
 }
+function stamp() { $("stamp").textContent = "updated " + new Date(data.generated*1000).toLocaleTimeString(undefined, {hour12:false}); }
 
 function tipAt(el, tip, e, cv, html) {
   const r = cv.getBoundingClientRect();
@@ -486,15 +614,36 @@ function pager() {
   p.append(up, `page ${page + 1}/${pages.length}`, dn);
 }
 function turn(d) { const n = Math.max(0, Math.min(pages.length - 1, page + d)); if (n !== page) { page = n; render(); } }
-function go(i) { cur = (i + META.groups.length) % META.groups.length; page = 0; load(); }
+// ←/→ stop at the first and last group instead of wrapping, so holding ← always lands on the
+// first group (and → on the last) without counting presses.
+function go(i) { const n = Math.max(0, Math.min(META.groups.length - 1, i)); if (n === cur) return; cur = n; page = 0; load(); }
+// Every group|range answer is kept, so going back to a group draws at once from memory and
+// the fresh copy replaces it a moment later. After each draw the neighbouring groups are
+// fetched in the background, so ←/→ is instant too.
+const seen = new Map();
+const groupURL = (g, r) => `api/group/${META.groups[g].id}?range=${r}`;
+async function getGroup(g, r) {
+  const res = await fetch(groupURL(g, r));
+  if (!res.ok) throw new Error(res.status + " " + res.statusText);
+  const d = await res.json(); seen.set(g + "|" + r, d); return d;
+}
 async function load() {
   location.hash = META.groups[cur].id + "/" + range; buttons();
+  const want = cur + "|" + range, g = cur, r = range;
+  if (seen.has(want)) { data = seen.get(want); render(); }
   try {
-    const r = await fetch(`api/group/${META.groups[cur].id}?range=${range}`);
-    if (!r.ok) throw new Error(r.status + " " + r.statusText);
-    data = await r.json(); render();
+    const t0 = performance.now();
+    const d = await getGroup(g, r);
+    if (g !== cur || r !== range) return;          // the reader has moved on
+    data = d;
+    const t1 = performance.now(); render(); const t2 = performance.now();
+    // read by test/perf.mjs: where the time goes on every load
+    window.askeePerf = {group: META.groups[g].id, range: r, fetchMs: t1 - t0, renderMs: t2 - t1, tiles: data.tiles.length};
+    const idle = window.requestIdleCallback || (f => setTimeout(f, 300));
+    idle(() => [1, -1].forEach(dx => { const n = g + dx;
+      if (n >= 0 && n < META.groups.length && !seen.has(n + "|" + r)) getGroup(n, r).catch(() => {}); }));
   } catch (e) { $("stamp").textContent = "fetch failed: " + e.message; }
-  clearTimeout(timer); timer = setTimeout(load, isLive() ? 15000 : 30000);
+  clearTimeout(timer); timer = setTimeout(load, CADENCE[range] || 300000);
 }
 addEventListener("keydown", e => {
   if (e.key === "ArrowRight") go(cur + 1);

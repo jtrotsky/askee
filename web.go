@@ -8,6 +8,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -21,6 +23,20 @@ import (
 
 //go:embed askee.html
 var pageHTML []byte
+
+//go:embed favicon.svg
+var faviconSVG []byte
+
+const csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+
+// pageGz is the page compressed once at start: ~30 KB of HTML becomes ~9 KB on the wire.
+var pageGz = func() []byte {
+	var buf bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	zw.Write(pageHTML)
+	zw.Close()
+	return buf.Bytes()
+}()
 
 func groupPages(all []page, g string) []page {
 	var out []page
@@ -93,7 +109,11 @@ func printGroup(cfg *Config, g string, r rng, w, h int) int {
 				fmtVal(se.v[len(se.v)-1]), fmtVal(mn), fmtVal(mx), fmtVal(sum/float64(len(se.v))), m.unit, len(se.v))
 		}
 		for _, rf := range m.refs {
-			fmt.Fprintf(out, "  reference: %s = %s %s\n", rf.Label, fmtVal(rf.V), m.unit)
+			u := m.unit
+			if m.kind == "blocks" {
+				u = "%" // a capacity reference is a share of each row's whole
+			}
+			fmt.Fprintf(out, "  reference: %s = %s %s\n", rf.Label, fmtVal(rf.V), u)
 		}
 		if p.Subtitle != "" {
 			fmt.Fprintf(out, "  so what: %s\n", p.Subtitle)
@@ -126,6 +146,9 @@ type tileJSON struct {
 	Lines    []string     `json:"lines,omitempty"`
 	Span     [2]int       `json:"span"`
 	Split    bool         `json:"split,omitempty"`
+	Log      bool         `json:"log,omitempty"`
+	Drawn    string       `json:"drawn,omitempty"` // range actually drawn: "live" slides with the clock
+	Blocks   []block      `json:"blocks,omitempty"`
 	Events   []event      `json:"events,omitempty"`
 }
 type seriesJSON struct {
@@ -136,7 +159,7 @@ type seriesJSON struct {
 
 func toTile(p page, m model) tileJSON {
 	t := tileJSON{ID: p.ID, Title: p.Title, Subtitle: p.Subtitle, Kind: m.kind, Unit: m.unit, Fixed: p.Range, Note: m.note,
-		YMin: m.yMin, YMax: m.yMax, Thermal: m.thermal, Stack: m.stack, Refs: m.refs, Bars: m.bars, Lines: m.lines, Step: m.step.Seconds(), Span: p.Span, Split: m.split, Events: m.events}
+		YMin: m.yMin, YMax: m.yMax, Thermal: m.thermal, Stack: m.stack, Refs: m.refs, Bars: m.bars, Lines: m.lines, Step: m.step.Seconds(), Span: p.Span, Split: m.split, Events: m.events, Log: m.log, Blocks: m.blocks, Drawn: m.rng}
 	if m.err != nil {
 		t.Err = m.err.Error()
 	}
@@ -166,17 +189,23 @@ type themeJSON struct {
 
 func serve(cfg *Config, addr string) error {
 	all := cfg.pages()
-	type cached struct {
-		at   time.Time
-		body []byte
-	}
-	var mu sync.Mutex
-	cache := map[string]cached{}
+	gc := newGroupCache(cfg, all)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		w.Header().Set("Content-Security-Policy", csp)
+		w.Header().Set("Vary", "Accept-Encoding")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Write(pageGz)
+			return
+		}
 		w.Write(pageHTML)
+	})
+	mux.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(faviconSVG)
 	})
 	mux.HandleFunc("GET /api/meta", func(w http.ResponseWriter, r *http.Request) {
 		type g struct {
@@ -212,26 +241,19 @@ func serve(cfg *Config, addr string) error {
 			http.Error(w, "unknown group or range", http.StatusNotFound)
 			return
 		}
-		key := id + "|" + rg.name
-		mu.Lock()
-		c, hit := cache[key]
-		mu.Unlock()
-		if !hit || time.Since(c.at) > 15*time.Second {
-			ms := fetchAll(ps, rg)
-			tiles := make([]tileJSON, len(ps))
-			for i := range ps {
-				tiles[i] = toTile(ps[i], ms[i])
-			}
-			body, _ := json.Marshal(map[string]any{"group": id, "title": cfg.groupTitle(id), "range": rg.name,
-				"generated": time.Now().Unix(), "tiles": tiles})
-			c = cached{time.Now(), body}
-			mu.Lock()
-			cache[key] = c
-			mu.Unlock()
+		if !ok {
+			rg, _ = rangeByName(cfg.DefaultRange)
 		}
+		e := gc.get(id, rg)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(c.body)
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Vary", "Accept-Encoding")
+			w.Write(e.gz)
+			return
+		}
+		w.Write(e.body)
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 60 * time.Second}
@@ -242,4 +264,164 @@ func serve(cfg *Config, addr string) error {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// ── group cache ─────────────────────────────────────────────────────────────────────
+// Clicking a group must feel instant, so a request never waits on the TSDB if anything is
+// cached: a stale entry is served at once and refreshed in the background (one refresh per
+// key at a time). A warmer keeps every group at the default and live ranges fresh, so even
+// the first click after a quiet hour is a cache hit. Bodies are stored gzipped too: a
+// 90-day group is ~100 KB of JSON and ~15 KB compressed, which matters over a phone link.
+type cacheEntry struct {
+	at       time.Time
+	body, gz []byte
+}
+
+type groupCache struct {
+	cfg     *Config
+	all     []page
+	mu      sync.Mutex
+	entries map[string]*cacheEntry
+	busy    map[string]chan struct{}
+	tiles   map[string]tileCache // last GOOD tile per page and range
+}
+
+type tileCache struct {
+	at time.Time
+	t  tileJSON
+}
+
+// pageTTL: how long one page's answer stays good regardless of the group's refresh. Charts
+// over a fixed month or more, and the 30-day hour-of-day profiles, move too slowly to re-ask.
+func pageTTL(p page) time.Duration {
+	if p.Kind == "hour" {
+		return 15 * time.Minute
+	}
+	if r, ok := rangeByName(p.Range); ok && r.span >= 30*24*time.Hour {
+		return 5 * time.Minute
+	}
+	return 0
+}
+
+func joinNote(a, b string) string {
+	if b == "" {
+		return a
+	}
+	return a + " · " + b
+}
+
+// ttl: how old an answer may be before it is refreshed, matched to how fast each range moves.
+func ttl(r rng) time.Duration {
+	switch {
+	case r.name == "live":
+		return 900 * time.Millisecond // a new sample every second
+	case r.span <= time.Hour:
+		return 30 * time.Second
+	case r.span <= 6*time.Hour:
+		return time.Minute
+	default:
+		return 2 * time.Minute
+	}
+}
+
+func newGroupCache(cfg *Config, all []page) *groupCache {
+	gc := &groupCache{cfg: cfg, all: all, entries: map[string]*cacheEntry{}, busy: map[string]chan struct{}{}, tiles: map[string]tileCache{}}
+	go func() {
+		for {
+			def, _ := rangeByName(cfg.DefaultRange)
+			live, _ := rangeByName("live")
+			for _, g := range cfg.Groups {
+				if len(groupPages(all, g.ID)) == 0 {
+					continue
+				}
+				for _, r := range []rng{def, live} {
+					gc.mu.Lock()
+					e := gc.entries[g.ID+"|"+r.name]
+					gc.mu.Unlock()
+					if e == nil || time.Since(e.at) > ttl(r) {
+						gc.refresh(g.ID, r)
+					}
+				}
+			}
+			time.Sleep(20 * time.Second)
+		}
+	}()
+	return gc
+}
+
+func (gc *groupCache) get(id string, r rng) *cacheEntry {
+	key := id + "|" + r.name
+	gc.mu.Lock()
+	e := gc.entries[key]
+	gc.mu.Unlock()
+	if e == nil {
+		return gc.refresh(id, r) // nothing to show yet: wait for it
+	}
+	if time.Since(e.at) > ttl(r) {
+		go gc.refresh(id, r) // serve what we have, fetch the new one behind it
+	}
+	return e
+}
+
+// refresh builds one group's JSON. Concurrent callers for the same key share one build.
+func (gc *groupCache) refresh(id string, r rng) *cacheEntry {
+	key := id + "|" + r.name
+	gc.mu.Lock()
+	if ch, ok := gc.busy[key]; ok {
+		gc.mu.Unlock()
+		<-ch
+		gc.mu.Lock()
+		e := gc.entries[key]
+		gc.mu.Unlock()
+		return e
+	}
+	ch := make(chan struct{})
+	gc.busy[key] = ch
+	gc.mu.Unlock()
+
+	ps := groupPages(gc.all, id)
+	tiles := make([]tileJSON, len(ps))
+	var wg sync.WaitGroup
+	for i, p := range ps {
+		tk := p.ID + "|" + r.name
+		gc.mu.Lock()
+		last, have := gc.tiles[tk]
+		gc.mu.Unlock()
+		// a page that cannot have changed yet is not asked again (a 30-day profile, say)
+		if have && time.Since(last.at) < pageTTL(p) {
+			tiles[i] = last.t
+			continue
+		}
+		wg.Add(1)
+		go func(i int, p page) {
+			defer wg.Done()
+			t := toTile(p, p.fetch(r))
+			gc.mu.Lock()
+			defer gc.mu.Unlock()
+			if t.Err == "" {
+				gc.tiles[tk] = tileCache{time.Now(), t}
+			} else if old, ok := gc.tiles[tk]; ok {
+				// keep the last good chart and say how old it is, instead of an error
+				st := old.t
+				st.Note = joinNote(fmt.Sprintf("as of %s — %s", old.at.Format("15:04"), t.Err), old.t.Note)
+				t = st
+			}
+			tiles[i] = t
+		}(i, p)
+	}
+	wg.Wait()
+	body, _ := json.Marshal(map[string]any{"group": id, "title": gc.cfg.groupTitle(id), "range": r.name,
+		"generated": time.Now().Unix(), "tiles": tiles})
+	var buf bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	zw.Write(body)
+	zw.Close()
+	e := &cacheEntry{time.Now(), body, buf.Bytes()}
+
+	gc.mu.Lock()
+	gc.entries[key] = e
+	delete(gc.busy, key)
+	gc.mu.Unlock()
+	close(ch)
+	return e
 }

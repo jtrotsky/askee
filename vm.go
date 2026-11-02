@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -14,7 +15,13 @@ import (
 )
 
 var vmBase string
-var client = &http.Client{Timeout: 20 * time.Second}
+
+// A dashboard must never wait long or pile on: one query may take 10 s at most, and at most
+// four run at once, so a refresh of every group cannot swamp a small database that is busy
+// with something else (a backup, an image build). A query that fails is not shown as an
+// error over good data — the group cache keeps the last good answer (web.go).
+var client = &http.Client{Timeout: 10 * time.Second}
+var vmSlots = make(chan struct{}, 4)
 
 type vmResult struct {
 	Metric map[string]string `json:"metric"`
@@ -23,9 +30,11 @@ type vmResult struct {
 }
 
 func vmQuery(path string, p url.Values) ([]vmResult, error) {
+	vmSlots <- struct{}{}
+	defer func() { <-vmSlots }()
 	resp, err := client.Get(vmBase + "/api/v1/" + path + "?" + p.Encode())
 	if err != nil {
-		return nil, err
+		return nil, shortErr(err)
 	}
 	defer resp.Body.Close()
 	var d struct {
@@ -122,4 +131,17 @@ func instant(expr string) ([]ires, error) {
 		}
 	}
 	return out, nil
+}
+
+// shortErr turns a transport error into words a reader can use; the URL (with its query) is
+// noise on a chart and is dropped.
+func shortErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if ue.Timeout() {
+			return fmt.Errorf("the database did not answer within %s", client.Timeout)
+		}
+		return fmt.Errorf("the database is unreachable (%v)", ue.Err)
+	}
+	return err
 }

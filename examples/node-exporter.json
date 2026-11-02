@@ -50,7 +50,8 @@
           "expr": "100 * avg(rate(node_cpu_seconds_total{mode=~\"nice|interrupt\"}))",
           "name": "other"
         }
-      ]
+      ],
+      "live": true
     },
     {
       "id": "temp",
@@ -74,7 +75,8 @@
           "value": 105,
           "label": "limit"
         }
-      ]
+      ],
+      "live": true
     },
     {
       "id": "load",
@@ -98,7 +100,8 @@
           "value": 4,
           "label": "4 cores"
         }
-      ]
+      ],
+      "live": true
     },
     {
       "id": "cpu_hour",
@@ -144,7 +147,8 @@
           "expr": "node_memory_size_bytes / 2^30",
           "label": "RAM"
         }
-      ]
+      ],
+      "live": true
     },
     {
       "id": "swap",
@@ -164,7 +168,8 @@
           "expr": "node_memory_swap_size_bytes / 2^20",
           "label": "swap size"
         }
-      ]
+      ],
+      "live": true
     },
     {
       "id": "arc_hit",
@@ -200,7 +205,8 @@
           "expr": "rate(node_network_transmit_bytes_total{device=\"igc0\"}) / 1e6",
           "name": "out"
         }
-      ]
+      ],
+      "live": true
     }
   ]
 }
