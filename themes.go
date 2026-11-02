@@ -8,7 +8,7 @@ package main
 // validator (scripts/validate_palette.js --mode dark --surface <Surface>): OKLCH lightness
 // band, chroma floor, adjacent-pair colour-blind separation (ΔE ≥ 8), normal-vision floor
 // (ΔE ≥ 15) and ≥ 3:1 contrast. The order is part of the safety, not decoration: don't
-// re-order a validated palette. btm and terminal are kept for familiarity and FAIL the gates
+// re-order a validated palette. terminal is kept for familiarity and FAILS the gates
 // (yellow↔green are hard to tell apart even with full colour vision) — they say so in the UI.
 //
 // Thermal is a fixed perceptual ramp (cool → hot), mapped to ABSOLUTE degrees via the
@@ -65,10 +65,7 @@ var themes = []Theme{
 	{ID: "amber", Name: "Amber", Status: "mono", Style: "flat", Mono: true, Note: "amber CRT: one phosphor, line styles",
 		Surface: "#0d0802", Panel: "#130c03", Border: "#3d2a0d", Grid: "#22180a", Text: "#ffc46b", Dim: "#a87a35", Title: "#ffd28a", Accent: "#ffe0a8",
 		Palette: []string{"#ffb84d", "#e09a2e", "#c0801f", "#9c6614", "#ffcc77", "#f0a83c"}},
-	// ── favourites first, flat and chalky ────────────────────────────────────────────────
-	{ID: "ember", Name: "Ember", Status: "validated", Style: "flat", Note: "copper lead on dark umber",
-		Surface: "#120f0c", Panel: "#17130f", Border: "#362d24", Grid: "#241e18", Text: "#f3ece4", Dim: "#a99c8c", Title: "#f0a070", Accent: "#d46a34",
-		Palette: []string{"#d46a34", "#0d9298", "#b88a01", "#b25196", "#47944c", "#6079d3", "#b9454c", "#2c9a88"}},
+	// ── flat colour, chalky ──────────────────────────────────────────────────────────────
 	{ID: "fjord", Name: "Fjord", Status: "validated", Style: "flat", Note: "Nord-like slate, muted",
 		Surface: "#161a22", Panel: "#1b2029", Border: "#323a48", Grid: "#232935", Text: "#e5e9f0", Dim: "#9aa3b2", Title: "#88c0d0", Accent: "#c48225",
 		Palette: []string{"#2e97ca", "#c48225", "#3aa273", "#8d6cc2", "#c6585d", "#06999a", "#949523", "#b55d92"}},
@@ -78,26 +75,10 @@ var themes = []Theme{
 	{ID: "chalkboard", Name: "Chalkboard", Status: "floor", Style: "flat", Note: "chalk on slate green; colour-blind ΔE in the 6–8 band, so lines also differ by style",
 		Dashed: true, Surface: "#1a231e", Panel: "#1f2a24", Border: "#3b4a41", Grid: "#2a3630", Text: "#e8ece4", Dim: "#a3ae9f", Title: "#e6d9a2", Accent: "#c86265",
 		Palette: []string{"#ac942f", "#2a98c4", "#c86265", "#9175c1", "#39a57e", "#b36d2a", "#4c77bd", "#b4608a"}},
-	// ── smooth: gradient washes and ramps ───────────────────────────────────────────────
-	{ID: "reference", Name: "Reference", Status: "validated", Style: "smooth", Note: "a validated reference dark palette — the safest default",
-		Surface: "#131312", Panel: "#1a1a19", Border: "#33332f", Grid: "#262624", Text: "#f0efec", Dim: "#a3a29a", Title: "#f0efec", Accent: "#d95926",
-		Palette: []string{"#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"}},
-	{ID: "kauri", Name: "Kauri", Status: "validated", Style: "smooth", Note: "deep-forest ground, sea blue lead",
-		Surface: "#0d1116", Panel: "#12161c", Border: "#26303b", Grid: "#1a212a", Text: "#e6ebef", Dim: "#91a0ad", Title: "#7cc4e8", Accent: "#c28412",
-		Palette: []string{"#1292c0", "#2e9e52", "#8f68cb", "#c28412", "#cb4644", "#06999a", "#989912", "#c0558d"}},
-	{ID: "pohutukawa", Name: "Pōhutukawa", Status: "validated", Style: "smooth", Note: "crimson lead on warm charcoal",
-		Surface: "#110f0f", Panel: "#161414", Border: "#332b2b", Grid: "#221e1e", Text: "#f2ecea", Dim: "#a8a09d", Title: "#f08a86", Accent: "#cb4644",
-		Palette: []string{"#cb4644", "#2d86c8", "#4e9a52", "#ae5ea8", "#b28d00", "#179a8e", "#c56c21", "#736dc3"}},
-	{ID: "aurora", Name: "Aurora", Status: "validated", Style: "smooth", Note: "teal lead on night blue",
-		Surface: "#0b0d18", Panel: "#0f1220", Border: "#262b45", Grid: "#181c30", Text: "#e8eaf6", Dim: "#9298b8", Title: "#5fd0c0", Accent: "#d15d4d",
-		Palette: []string{"#08a28f", "#d15d4d", "#af62c1", "#ac9003", "#4278d2", "#4f9b3e", "#725ec2", "#c8741d"}},
-	// ── familiar, not colour-blind safe ─────────────────────────────────────────────────
+	// ── the standard terminal colours, not colour-blind safe ────────────────────────────
 	{ID: "terminal", Name: "Terminal", Status: "fails", Style: "flat", Note: "the deck's xterm-256 colours; yellow and green are hard to tell apart",
 		Surface: "#0b0e14", Panel: "#10141b", Border: "#2b313c", Grid: "#1d222b", Text: "#d0d0d0", Dim: "#8a8f98", Title: "#5fd7ff", Accent: "#ffaf00",
 		Palette: []string{"#5fd7ff", "#87ff87", "#ffff87", "#ff87ff", "#87d7ff", "#ff8787", "#afffff", "#d7afff"}},
-	{ID: "btm", Name: "btm", Status: "fails", Style: "flat", Note: "bottom's default theme (xterm bright colours)",
-		Surface: "#000000", Panel: "#000000", Border: "#6c6c6c", Grid: "#1c1c1c", Text: "#bcbcbc", Dim: "#808080", Title: "#bcbcbc", Accent: "#5c5cff",
-		Palette: []string{"#ff55ff", "#ffff55", "#55ffff", "#55ff55", "#5c5cff", "#ff5555", "#00cdcd", "#00cd00"}},
 }
 
 // thermalFor returns the temperature ramp for a theme: the smooth ramp, the same ramp in six hard

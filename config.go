@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,8 +32,13 @@ type Config struct {
 	DefaultRange string     `json:"default_range"`
 	DefaultTheme string     `json:"default_theme"`
 	Events       []EventCfg `json:"events"` // drawn on every line chart: "what happened here?"
-	Groups       []Group    `json:"groups"`
-	Pages        []PageCfg  `json:"pages"`
+	// LiveSource is an exporter's /metrics URL (e.g. node_exporter, optionally with
+	// collect[] filters). On the live range, live pages are computed from it directly —
+	// read every second while someone is watching, five minutes kept in memory, nothing
+	// stored. All other ranges read the database as usual.
+	LiveSource string    `json:"live_source"`
+	Groups     []Group   `json:"groups"`
+	Pages      []PageCfg `json:"pages"`
 }
 
 type Group struct {
@@ -45,6 +51,20 @@ type Group struct {
 type EventCfg struct {
 	Label string `json:"label"`
 	Expr  string `json:"expr"`
+}
+
+// block is one row of a block chart: a bar built from named segments, optionally inside a
+// known total (capacity), with the row's number printed at its end.
+type block struct {
+	Label string  `json:"label"`
+	Segs  []seg   `json:"segs"`
+	Total float64 `json:"total,omitempty"` // capacity: the whole; the rest is drawn as free
+	Text  string  `json:"text"`
+}
+
+type seg struct {
+	Name string  `json:"name"`
+	V    float64 `json:"v"`
 }
 
 type event struct {
@@ -71,7 +91,10 @@ type PageCfg struct {
 	Subtitle string      `json:"subtitle"` // the "so what" — one line under the title
 	Kind     string      `json:"kind"`     // line | hour | instant | runs | snapshot | sizes
 	Unit     string      `json:"unit"`
-	Range    string      `json:"range"` // fixed range for this page ("" = the selected one)
+	Range    string      `json:"range"`    // fixed range for this page ("" = the selected one)
+	Live     bool        `json:"live"`     // fast-moving: follows the "live" range (others show 1h)
+	Log      bool        `json:"log"`      // log scale: for values spanning orders of magnitude (latency)
+	Capacity string      `json:"capacity"` // capacity kind: expr for the TOTAL; expr is the USED part
 	YMin     *float64    `json:"ymin"`
 	YMax     *float64    `json:"ymax"`
 	Series   []SeriesCfg `json:"series"`
@@ -110,7 +133,10 @@ type model struct {
 	thermal bool
 	stack   bool
 	split   bool
+	log     bool
+	rng     string // the range actually drawn (a non-live page in the live view shows 1h)
 	events  []event
+	blocks  []block
 	note    string
 	start   time.Time
 	end     time.Time
@@ -125,8 +151,10 @@ type rng struct {
 }
 
 var ranges = []rng{
-	{"15m", 15 * time.Minute, 15 * time.Second},
-	{"1h", time.Hour, 15 * time.Second},
+	// live: the last five minutes, refetched every few seconds and sliding with the clock.
+	// Only pages marked "live" use it; the rest of the group shows the last hour.
+	{"live", 5 * time.Minute, time.Second},
+	{"1h", time.Hour, 30 * time.Second},
 	{"6h", 6 * time.Hour, time.Minute},
 	{"24h", 24 * time.Hour, 5 * time.Minute},
 	{"7d", 7 * 24 * time.Hour, 30 * time.Minute},
@@ -210,7 +238,10 @@ func (p page) fetch(r rng) model {
 	if p.Range != "" && p.Range != "now" && p.Range != "snapshot" {
 		r, _ = rangeByName(p.Range)
 	}
-	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, split: p.Split, note: p.Note}
+	if r.name == "live" && !p.Live {
+		r, _ = rangeByName("1h")
+	}
+	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, split: p.Split, log: p.Log, note: p.Note, rng: r.name}
 	end := time.Now()
 	start := end.Add(-r.span)
 	switch p.Kind {
@@ -218,6 +249,21 @@ func (p page) fetch(r rng) model {
 		var qs []q
 		for _, s := range p.Series {
 			qs = append(qs, q{s.Expr, s.Name, s.Label})
+		}
+		if r.name == "live" && p.Live && p.cfg.LiveSource != "" {
+			if ss, last, err := p.cfg.live().series(qs); err == nil {
+				m.series, m.start, m.end, m.step = ss, last.Add(-r.span), last, r.step
+				m.refs = p.resolveRefs()
+				// until five minutes have been read, the older part of the window comes from
+				// the database (30 s points), so the chart is never a few lonely seconds
+				if first := firstT(ss); first > float64(m.start.Unix())+30 {
+					if old, err := rangeSeries(qs, m.start, time.Unix(int64(first), 0), 30*time.Second); err == nil {
+						m.series = prepend(old, ss, first)
+					}
+				}
+				break
+			}
+			// a query the live evaluator cannot do falls through to the database
 		}
 		m.series, m.err = rangeSeries(qs, start, end, r.step)
 		m.start, m.end, m.step = start, end, r.step
@@ -291,10 +337,48 @@ func (p page) fetch(r rng) model {
 			m.kind, m.bars, m.unit, m.lines = "bars", bars, unit, nil
 		}
 	case "sizes":
-		m.kind = "text"
-		m.lines, m.note, m.err = sizesTable(p.cfg)
+		m.kind = "blocks"
+		m.blocks, m.unit, m.note, m.err = sizesBlocks(p.cfg)
+	case "capacity":
+		// a snapshot section whose lines read "name (USED of TOTAL UNIT …)" — zpool list's shape
+		m.kind = "blocks"
+		secs, when, err := readSnapshot(p.cfg.Snapshot)
+		if err != nil {
+			m.err = fmt.Errorf("no snapshot yet (%v)", err)
+			break
+		}
+		s, ok := secs[p.Key]
+		if !ok {
+			m.err = fmt.Errorf("snapshot of %s has no %q section", when, p.Key)
+			break
+		}
+		for _, l := range cleanSnapshot(s[1]) {
+			x := capLine.FindStringSubmatch(l)
+			if x == nil {
+				continue
+			}
+			used, _ := strconv.ParseFloat(x[2], 64)
+			total, _ := strconv.ParseFloat(x[3], 64)
+			if total <= 0 {
+				continue
+			}
+			m.unit = x[4]
+			m.blocks = append(m.blocks, block{Label: x[1], Segs: []seg{{"used", used}}, Total: total,
+				Text: fmt.Sprintf("%s of %s %s · %.0f%%", trimNum(used), trimNum(total), x[4], 100*used/total)})
+		}
+		if len(m.blocks) == 0 {
+			m.err = fmt.Errorf("no \"name (used of total unit)\" lines in %q", p.Key)
+		}
+		m.refs = p.resolveRefs()
+		m.note = "snapshot " + when + noteSep(p.Note)
 	default:
 		m.err = fmt.Errorf("unknown page kind %q", p.Kind)
+	}
+	if m.kind == "blocks" {
+		m.lines = blockLines(m.blocks, 32) // the terminal and -print draw these as text
+	}
+	if m.kind == "bars" && m.refs == nil {
+		m.refs = p.resolveRefs() // e.g. "a missed night" on hours-since-backup
 	}
 	return m
 }
@@ -494,6 +578,29 @@ func barsFromText(lines []string) ([]bar, string, bool) {
 
 // eventsIn returns the configured events whose timestamps fall inside [start, end].
 func (c *Config) eventsIn(start, end time.Time) []event {
+	key := fmt.Sprintf("%d|%d", start.Unix()/60, end.Unix()/60)
+	evMu.Lock()
+	if e, ok := evCache[key]; ok {
+		evMu.Unlock()
+		return e
+	}
+	evMu.Unlock()
+	out := c.eventsQuery(start, end)
+	evMu.Lock()
+	if len(evCache) > 64 {
+		evCache = map[string][]event{}
+	}
+	evCache[key] = out
+	evMu.Unlock()
+	return out
+}
+
+var (
+	evMu    sync.Mutex
+	evCache = map[string][]event{}
+)
+
+func (c *Config) eventsQuery(start, end time.Time) []event {
 	var out []event
 	for _, e := range c.Events {
 		res, err := rangeSeries([]q{{expr: e.Expr, name: e.Label}}, start, end, time.Hour)
@@ -522,4 +629,183 @@ func (c *Config) eventsIn(start, end time.Time) []event {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].T < out[j].T })
 	return out
+}
+
+var capLine = regexp.MustCompile(`^\s*(\S+)\s+\(([\d.]+) of ([\d.]+) (\w+)`)
+
+func trimNum(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
+
+// sizesBlocks turns the backup sizes table (TARGET LOCAL NAS COLD, human sizes) into one block
+// row per store, each split into the biggest targets plus "other", so the reader sees both
+// how much each store holds and what fills it.
+func sizesBlocks(c *Config) ([]block, string, string, error) {
+	b, err := os.ReadFile(c.Sizes)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("no sizes yet (%v)", err)
+	}
+	st, _ := os.Stat(c.Sizes)
+	hdr := []string{"TARGET", "LOCAL", "REMOTE", "BILLED"}
+	type row struct {
+		name string
+		v    [3]float64
+	}
+	var rows []row
+	var estimated []string
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) == 4 && f[0] == "TARGET" {
+			hdr = f
+			continue
+		}
+		if len(f) != 4 || strings.HasPrefix(f[0], "─") {
+			continue
+		}
+		r := row{name: f[0]}
+		for i := 0; i < 3; i++ {
+			r.v[i] = parseHuman(f[i+1]) / 1e9 // GB
+		}
+		if f[0] == "TOTAL" {
+			continue // summed from the rows, so an estimated row is counted too
+		}
+		if f[1] == "-" && r.v[1] > 0 {
+			// too big to walk nightly: the NAS copy is the best figure for what is here
+			r.v[0] = r.v[1]
+			estimated = append(estimated, r.name)
+		}
+		rows = append(rows, r)
+	}
+	if len(rows) == 0 {
+		return nil, "", "", fmt.Errorf("sizes file has no rows")
+	}
+	// the same top targets in every row, so a segment means the same thing all the way down
+	sort.SliceStable(rows, func(i, j int) bool {
+		return math.Max(rows[i].v[1], rows[i].v[2]) > math.Max(rows[j].v[1], rows[j].v[2])
+	})
+	const top = 5
+	names := map[string]string{"LOCAL": "on this box", "NAS": "NAS", "COLD": "cold cloud", "REMOTE": "remote", "BILLED": "billed"}
+	var out []block
+	for col := 0; col < 3; col++ {
+		var bl block
+		bl.Label = names[hdr[col+1]]
+		if bl.Label == "" {
+			bl.Label = strings.ToLower(hdr[col+1])
+		}
+		other := 0.0
+		for i, r := range rows {
+			if i < top {
+				bl.Segs = append(bl.Segs, seg{r.name, r.v[col]})
+			} else {
+				other += r.v[col]
+			}
+		}
+		bl.Segs = append(bl.Segs, seg{"other", other})
+		sum := 0.0
+		for _, s := range bl.Segs {
+			sum += s.V
+		}
+		bl.Text = fmtGB(sum)
+		if hdr[col+1] == "COLD" && c.PricePerTB > 0 {
+			bl.Text += fmt.Sprintf(" · $%.2f/mo", sum/1000*c.PricePerTB)
+		}
+		out = append(out, bl)
+	}
+	note := "snapshot " + st.ModTime().Format("02 Jan 15:04")
+	if len(estimated) > 0 {
+		note += " · on this box, " + strings.Join(estimated, ", ") + " is the NAS figure (too big to walk nightly)"
+	}
+	return out, "GB", note, nil
+}
+
+func fmtGB(gb float64) string {
+	if gb >= 1000 {
+		return fmt.Sprintf("%.2f TB", gb/1000)
+	}
+	return fmt.Sprintf("%.1f GB", gb)
+}
+
+// blockLines draws block rows as text, the report kit's way: █ for used or a segment, ░ for
+// the free part of a capacity row. Segmented rows share one scale; capacity rows are each
+// their own whole.
+func blockLines(bs []block, w int) []string {
+	lw, max := 0, 0.0
+	for _, b := range bs {
+		lw = maxInt(lw, len([]rune(b.Label)))
+		sum := 0.0
+		for _, s := range b.Segs {
+			sum += s.V
+		}
+		max = math.Max(max, math.Max(sum, b.Total))
+	}
+	glyph := []rune("█▓▒░")
+	var out []string
+	for _, b := range bs {
+		var sb strings.Builder
+		scale := float64(w) / max
+		if b.Total > 0 {
+			scale = float64(w) / b.Total
+		}
+		n := 0
+		for k, s := range b.Segs {
+			c := int(s.V*scale + 0.5)
+			g := glyph[0]
+			if b.Total == 0 {
+				g = glyph[k%3]
+			}
+			sb.WriteString(strings.Repeat(string(g), c))
+			n += c
+		}
+		if b.Total > 0 && n < w {
+			sb.WriteString(strings.Repeat("·", w-n))
+		}
+		out = append(out, fmt.Sprintf("%-*s %s %s", lw, b.Label, sb.String(), b.Text))
+		if b.Total == 0 {
+			var parts []string
+			for _, s := range b.Segs {
+				if s.V > 0 {
+					parts = append(parts, fmt.Sprintf("%s %s", s.Name, fmtGB(s.V)))
+				}
+			}
+			out = append(out, fmt.Sprintf("%-*s   %s", lw, "", strings.Join(parts, " · ")))
+		}
+	}
+	return out
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func firstT(ss []series) float64 {
+	f := math.Inf(1)
+	for _, s := range ss {
+		if len(s.t) > 0 {
+			f = math.Min(f, s.t[0])
+		}
+	}
+	return f
+}
+
+// prepend puts the database's older points in front of the live ones, series by name.
+func prepend(old, live []series, before float64) []series {
+	byName := map[string]series{}
+	for _, o := range old {
+		byName[o.name] = o
+	}
+	for i, l := range live {
+		o, ok := byName[l.name]
+		if !ok {
+			continue
+		}
+		var t, v []float64
+		for k := range o.t {
+			if o.t[k] < before {
+				t, v = append(t, o.t[k]), append(v, o.v[k])
+			}
+		}
+		live[i].t, live[i].v = append(t, l.t...), append(v, l.v...)
+	}
+	return live
 }

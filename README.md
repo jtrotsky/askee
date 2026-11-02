@@ -42,8 +42,16 @@ The rest follows the same idea, after Tufte's *The Visual Display of Quantitativ
 - **Text stays readable.** Fonts never shrink below 11 px. A chart with many bars takes more
   room on the grid, and if it still does not fit, it scrolls inside its tile instead of
   shrinking.
-- **Live.** On the 15-minute and 1-hour ranges the chart slides with the clock every second,
-  like btm, and fetches new data every 15 seconds. It is only as fine as your scrape interval.
+- **Live, without a database.** The `live` range ticks every second, like btm. With
+  `live_source` set to an exporter's `/metrics` URL, askee reads it once a second **only while
+  someone is watching**, keeps five minutes in memory and stores nothing; the older part of the
+  window is filled from the database until those five minutes are read. Live pages are computed
+  from a small PromQL subset (`rate`, `sum`/`avg`/`max`/`min`, label matchers, arithmetic);
+  anything beyond it falls back to the database. Other ranges stand still and repaint in place
+  on a cadence that suits them (1 min for 1h, 5 min beyond).
+- **Instant.** The server answers from a cache it keeps warm and refreshes behind the reader;
+  the page keeps every group it has seen and fetches the neighbours in the background, so
+  ←/→ draws at once. `test/perf.mjs` holds it to a budget (below).
 - **Keyboard and touch.** ←/→ move between groups of charts, ↑/↓ between pages, 1–7 pick the
   time range, `t` cycles themes and `a` returns to automatic. Swipe left and right on a phone.
 
@@ -58,7 +66,7 @@ spans more cells. When a group has more charts than fit, it gets pages.
 ![Sepia theme](images/web-sepia.png)
 
 ```sh
-askee -config my.json -serve 127.0.0.1:8095
+askee -serve 127.0.0.1:8095
 ```
 
 It is read-only and takes no query text from the browser: only a group name and one of the
@@ -77,7 +85,9 @@ Truecolor when the terminal says so, the nearest xterm-256 colour otherwise.
 ![Terminal deck, Newsprint](images/terminal-newsprint.png)
 
 ```sh
-askee -config my.json
+askee                      # finds the config: $ASKEE_CONFIG, ./askee.json,
+                           # ~/.config/askee/askee.json, /usr/local/etc/askee/askee.json
+askee -config my.json      # or name it
 ```
 
 ### Plain text
@@ -105,34 +115,44 @@ $ askee -config my.json -print system -range 24h -size 72x9
 
 ## Themes
 
-Fifteen, shared by every face. Pick with the drop-down, `t`, `?theme=sepia` in the URL, or
-`ASKEE_THEME=sepia` in the terminal.
+Nine, shared by every face, in three kinds. Pick with the drop-down, `t`, `?theme=sepia` in the
+URL, or `ASKEE_THEME=sepia` in the terminal.
 
-| theme | style | colour-blind check | look |
+| theme | kind | colour-blind check | look |
 |---|---|---|---|
 | **newsprint** | print | one ink, line styles | greyscale on newsprint — the light default |
 | **sepia** | print | one ink, line styles | brown ink on old paper |
 | **carbon** | print | one ink, line styles | greyscale on charcoal — the dark default |
 | phosphor | print | one ink, line styles | green CRT |
 | amber | print | one ink, line styles | amber CRT |
-| ember | flat | passes | copper on dark umber |
+| ember-chalk | flat | passes | copper and chalk on warm grey |
 | fjord | flat | passes | muted Nord-like slate |
-| ember-chalk | flat | passes | Ember softened toward chalk |
 | chalkboard | flat | borderline, so lines are also dashed | chalk on slate green |
-| reference | smooth | passes | a validated reference palette |
-| kauri | smooth | passes | sea blue on deep forest |
-| pohutukawa | smooth | passes | crimson on warm charcoal |
-| aurora | smooth | passes | teal on night blue |
-| terminal | flat | **fails** (yellow and green) | bright xterm-256 colours |
-| btm | flat | **fails** (yellow and green) | bottom's default |
+| terminal | flat | **fails** (yellow and green) | the standard xterm-256 colours |
 
-**Flat** themes are chalky: solid bars, no washes, temperatures in six hard steps.
-**Smooth** themes add gradient washes, and bars run along a one-hue ramp so length and colour
-agree. Gradients only ever carry data.
+**Print** themes use one ink and tell lines apart by dash pattern. **Flat** themes use a few
+solid, chalky colours; colour only ever names a series or carries a temperature.
 
-![Ember theme](images/web-ember.png)
+![Ember chalk theme](images/web-ember.png)
 
 ![Fjord theme](images/web-fjord.png)
+
+## Chart styles
+
+Six, and every page is one of them. Each follows the same rules: a title of a few words,
+numbers printed, a comparison on the chart, no legend to decode.
+
+| style | config | use it for |
+|---|---|---|
+| **line** | `kind: line` | one to four series over time. Named at the right end; reference values dashed. `log` for values spanning orders of magnitude (latency). |
+| **stack** | `kind: line`, `stack: true` | parts of a whole over time (memory, CPU by kind). Bands are solid tints, named at their middle. |
+| **small multiples** | `kind: line`, `split: true` | series on very different scales (free space per pool): one panel each, one time axis. |
+| **bars** | `instant`, `runs`, `hour` | a ranked list or a profile. Block cells, value at the end, a reference rule where one exists. |
+| **blocks** | `capacity`, `sizes` | how full something is, or what fills it: a row of cells per thing, free space as empty cells. |
+| **table** | `snapshot` | a handful of numbers a reader would rather read than estimate. |
+
+Horizontal bars are drawn as runs of small cells, like a row of `█` in a terminal — the same
+look in the browser, the deck and `-print`.
 
 ## Install
 
@@ -145,6 +165,19 @@ go build -o askee .
 
 Go 1.27 or later. Edit `vm` in the example to point at your database.
 
+## Tests
+
+```sh
+go test ./...                            # every page of the example renders, at every range,
+                                         # against a fake Prometheus API — no database needed
+go test -run XXX -bench Group .          # one group built from scratch (about 10 ms)
+node test/perf.mjs http://127.0.0.1:8095/  # a real headless Chrome: fetch, draw and live tick
+                                           # for every group and range, against a budget
+```
+
+The browser test needs Node 22+ and Chrome or Chromium (`CHROME=` to point at it). It fails
+if a fetch takes over 150 ms, a draw over 100 ms, or a live tick over one 16 ms frame.
+
 ## The config
 
 ```jsonc
@@ -155,6 +188,7 @@ Go 1.27 or later. Edit `vm` in the example to point at your database.
   "default_theme": "auto",                // newsprint on light systems, carbon on dark
   "thermal_range": [30, 100],             // °C mapped to the cool→hot scale, the same in every chart
   "events": [{"label": "reboot", "expr": "node_boot_time_seconds"}],  // value = a unix time
+  "live_source": "http://127.0.0.1:9100/metrics?collect[]=cpu&collect[]=loadavg&collect[]=netdev",
   "snapshot": "/path/data.md",            // optional: `### key` sections written by another job
   "sizes": "/path/sizes.txt",             // optional: TARGET LOCAL REMOTE BILLED table
   "price_per_tb": 7.50, "price_label": "cold $/mo",
@@ -170,12 +204,13 @@ Go 1.27 or later. Edit `vm` in the example to point at your database.
 
 | kind | draws | keys |
 |---|---|---|
-| `line` | time series | `series[]` (`expr` + `name`, or `label` to name each result), `refs[]` (`value` or `expr`, + `label`), `ymin`/`ymax`, `stack` for parts of a whole, `split` for one panel per series on its own scale, `thermal` to colour a line by temperature |
+| `line` | time series | `series[]` (`expr` + `name`, or `label` to name each result), `refs[]` (`value` or `expr`, + `label`), `ymin`/`ymax`, `stack` for parts of a whole, `split` for one panel per series on its own scale, `thermal` to colour a line by temperature, `live` to follow the live range, `log` for a log scale |
 | `hour` | 30-day mean by hour of day, as bars | `expr` |
+| `capacity` | how full each thing is, as block rows | `key`: a snapshot section of `name (USED of TOTAL UNIT)` lines; `refs` in % |
 | `instant` | one bar per result of an instant query | `expr`, `label`, `min_value`, `limit` |
 | `runs` | one bar per run of a job, de-duplicated on the run's own timestamp | `expr`, `key` |
 | `snapshot` | a section of the snapshot file; a bar figure becomes real bars | `key` |
-| `sizes` | a sizes table with a cost column | — |
+| `sizes` | a backup sizes table as block rows, one per store, split by target | — |
 
 Every page also takes `title` (what, in a few words), `subtitle` (so what, one sentence, shown on hover), `unit`, `range` (a fixed range
 such as `30d`), `note`, and `span: [columns, rows]` to give it more of the grid.
