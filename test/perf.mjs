@@ -8,7 +8,7 @@
 // Budgets are what "instant" means to a person: under 100 ms feels immediate, a frame is
 // 16 ms. A cold first load gets more because it also fetches the page and /api/meta.
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,13 +17,16 @@ const CHROME = process.env.CHROME || "chrome";
 const BUDGET = { firstMs: 800, fetchMs: 150, renderMs: 100, tickMs: 50 };
 const PORT = 9300 + Math.floor(Math.random() * 500);
 
+// A fresh Chromium profile per run, removed on exit: one was left in /tmp on every run until
+// 2026-11-04 (19 of them, ~1.4 MB each, in two days).
+const PROFILE = mkdtempSync(join(tmpdir(), "askee-perf-"));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const chrome = spawn(CHROME, [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-  `--remote-debugging-port=${PORT}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "askee-perf-"))}`,
+  `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`,
   "--window-size=1600,900", "about:blank",
-], { stdio: "ignore" });
-process.on("exit", () => chrome.kill());
+], { stdio: "ignore", detached: true }); // its own process group, so exit can end every child
+process.on("exit", () => { try { process.kill(-chrome.pid, "SIGKILL"); } catch {} try { rmSync(PROFILE, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch {} });
 
 let target;
 for (let i = 0; i < 50 && !target; i++) {

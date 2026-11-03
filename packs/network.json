@@ -1,0 +1,7 @@
+{
+  "groups": [{"id": "network", "title": "Network"}],
+  "pages": [
+    {"id": "net", "group": "network", "kind": "line", "title": "Network traffic", "unit": "MB/s", "live": true, "ymin": 0, "info": "Physical network cards only, so bridges, tunnels, jails and containers do not count twice.", "series": [{"expr": "sum(rate(node_network_receive_bytes_total{device=~\"(eth|wlan|igc|igb|em|ix|ixl|ixv|ice|re|rge|bge|bce|bnxt|vtnet|vmx|mce|cxl|cc|ue|ure|axe|axge|alc|age|msk|sk|fxp|lem|hn|xn|ena|gve|mlxen|ql|oce|vge|nfe|dc|rl|vr|xl|jme|sge|ae|tsec|cpsw|ffec|genet|dwc|awg|eqos)[0-9]+|(en|wl|ww)([ospxb][0-9a-z_]*|[0-9]+)|ib[0-9]+\",$node}$__rate)) / 1e6", "name": "in"}, {"expr": "sum(rate(node_network_transmit_bytes_total{device=~\"(eth|wlan|igc|igb|em|ix|ixl|ixv|ice|re|rge|bge|bce|bnxt|vtnet|vmx|mce|cxl|cc|ue|ure|axe|axge|alc|age|msk|sk|fxp|lem|hn|xn|ena|gve|mlxen|ql|oce|vge|nfe|dc|rl|vr|xl|jme|sge|ae|tsec|cpsw|ffec|genet|dwc|awg|eqos)[0-9]+|(en|wl|ww)([ospxb][0-9a-z_]*|[0-9]+)|ib[0-9]+\",$node}$__rate)) / 1e6", "name": "out"}]},
+    {"id": "net_by_if", "group": "network", "kind": "instant", "title": "Traffic by interface", "unit": "MB/s", "label": "device", "limit": 10, "min_value": 0.0001, "info": "Throughput now on every interface, virtual ones included, in and out added together.", "expr": "sum by (device) (rate(node_network_receive_bytes_total{device!~\"lo[0-9]*\",$node}[1m]) + rate(node_network_transmit_bytes_total{device!~\"lo[0-9]*\",$node}[1m])) / 1e6"}
+  ]
+}

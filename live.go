@@ -1,7 +1,7 @@
 package main
 
 // The live range, without a database. While someone is watching, askee reads the exporter's
-// /metrics page (config "live_source") once a second and keeps the last five minutes in
+// /metrics pages (config "live_source" and "live_sources") once a second and keeps the last five minutes in
 // memory: nothing is stored, and nothing is read when nobody is looking. Live pages are then
 // computed here, from a small subset of PromQL that covers what a live chart needs:
 //
@@ -38,7 +38,7 @@ type snapshot struct {
 }
 
 type liveStore struct {
-	url    string
+	urls   []string
 	mu     sync.Mutex
 	snaps  []snapshot
 	wanted time.Time
@@ -56,19 +56,36 @@ var (
 // live page refers to, so a /metrics page of thousands of series costs a few dozen in memory.
 func (c *Config) live() *liveStore {
 	liveOnce.Do(func() {
-		liveSt = &liveStore{url: c.LiveSource, names: map[string]bool{}}
-		for _, p := range c.pages() {
-			if !p.Live {
-				continue
-			}
-			for _, s := range p.Series {
-				for _, n := range metricNames(s.Expr) {
-					liveSt.names[n] = true
-				}
-			}
-		}
+		liveSt = &liveStore{urls: c.liveURLs(), names: liveNames(c)}
 	})
 	return liveSt
+}
+
+func liveNames(c *Config) map[string]bool {
+	names := map[string]bool{}
+	for _, p := range c.pages() {
+		if !p.Live {
+			continue
+		}
+		for _, s := range p.Series {
+			for _, n := range metricNames(bare(s.Expr)) {
+				names[n] = true
+			}
+		}
+	}
+	return names
+}
+
+// reloadLive points a running live store at a reloaded catalogue's live pages. The URL is
+// kept: changing live_source or live_sources needs a restart (the reader may be mid-request).
+func reloadLive(c *Config) {
+	if liveSt == nil {
+		return
+	}
+	n := liveNames(c)
+	liveSt.mu.Lock()
+	liveSt.names = n
+	liveSt.mu.Unlock()
 }
 
 var nameRe = regexp.MustCompile(`[a-zA-Z_:][a-zA-Z0-9_:]*`)
@@ -78,7 +95,7 @@ func metricNames(expr string) []string {
 	var out []string
 	for _, n := range nameRe.FindAllString(stripQuoted(expr), -1) {
 		switch n {
-		case "rate", "sum", "avg", "max", "min", "by", "without":
+		case "rate", "sum", "avg", "max", "min", "by", "without", "or", "vector", "histogram_quantile", "le":
 			continue
 		}
 		out = append(out, n)
@@ -132,15 +149,56 @@ func (ls *liveStore) run() {
 var liveClient = &http.Client{Timeout: 900 * time.Millisecond}
 
 func (ls *liveStore) read() {
-	resp, err := liveClient.Get(ls.url)
-	if err != nil {
-		ls.mu.Lock()
+	ls.mu.Lock()
+	urls, names := ls.urls, ls.names
+	ls.mu.Unlock()
+	snap := snapshot{t: time.Now(), v: map[string]float64{}}
+	parts := make([]map[string]float64, len(urls))
+	errs := make([]error, len(urls))
+	var wg sync.WaitGroup
+	for i, u := range urls { // every source at once, so one slow exporter does not delay the rest
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			parts[i], errs[i] = readSource(u, names)
+		}()
+	}
+	wg.Wait()
+	var err error
+	ok := 0
+	for i := range urls {
+		if errs[i] != nil {
+			err = errs[i]
+			continue
+		}
+		ok++
+		for k, v := range parts[i] {
+			snap.v[k] = v
+		}
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ok == 0 { // a source that fails leaves only its own pages short; all failing is an error
 		ls.err = err
-		ls.mu.Unlock()
 		return
 	}
+	ls.err = nil
+	ls.snaps = append(ls.snaps, snap)
+	cut := 0
+	for cut < len(ls.snaps) && time.Since(ls.snaps[cut].t) > liveKeep {
+		cut++
+	}
+	ls.snaps = ls.snaps[cut:]
+}
+
+// readSource reads one /metrics page, keeping only the metric names live pages use.
+func readSource(url string, names map[string]bool) (map[string]float64, error) {
+	resp, err := liveClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
-	snap := snapshot{t: time.Now(), v: map[string]float64{}}
+	out := map[string]float64{}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -149,20 +207,12 @@ func (ls *liveStore) read() {
 			continue
 		}
 		name, labels, val, ok := parseSample(line)
-		if !ok || !ls.names[name] {
+		if !ok || !names[name] {
 			continue
 		}
-		snap.v[seriesKey(name, labels)] = val
+		out[seriesKey(name, labels)] = val
 	}
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
-	ls.err = nil
-	ls.snaps = append(ls.snaps, snap)
-	cut := 0
-	for cut < len(ls.snaps) && time.Since(ls.snaps[cut].t) > liveKeep {
-		cut++
-	}
-	ls.snaps = ls.snaps[cut:]
+	return out, sc.Err()
 }
 
 // parseSample reads one exposition-format line: name{a="b",c="d"} value [timestamp].
@@ -237,6 +287,14 @@ func seriesKey(name string, labels map[string]string) string {
 	return b.String()
 }
 
+// dropName strips the metric name from a series key, leaving its labels.
+func dropName(key string) string {
+	if i := strings.IndexByte(key, 0); i >= 0 {
+		return key[i:]
+	}
+	return ""
+}
+
 func splitKey(key string) (string, map[string]string) {
 	parts := strings.Split(key, "\x00")
 	labels := map[string]string{}
@@ -264,7 +322,7 @@ func (ls *liveStore) series(qs []q) ([]series, time.Time, error) {
 	}
 	var out []series
 	for _, qq := range qs {
-		n, err := parseLive(qq.expr)
+		n, err := parseLive(bare(qq.expr)) // $__rate is a database window; live, rate() reads consecutive samples
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -378,32 +436,89 @@ func (r rateOf) eval(s []snapshot, i int) vec {
 type agg struct {
 	op string
 	in node
+	by []string // group on these labels; none = one aggregate
 }
 
 func (a agg) eval(s []snapshot, i int) vec {
-	in := a.in.eval(s, i)
-	if len(in) == 0 {
-		return vec{}
-	}
-	var r float64
-	first := true
-	for _, v := range in {
-		switch {
-		case first:
-			r = v
-		case a.op == "sum" || a.op == "avg":
-			r += v
-		case a.op == "max":
-			r = math.Max(r, v)
-		case a.op == "min":
-			r = math.Min(r, v)
+	groups := map[string][]float64{}
+	for k, v := range a.in.eval(s, i) {
+		g := ""
+		if len(a.by) > 0 {
+			_, l := splitKey(k)
+			keep := map[string]string{}
+			for _, b := range a.by {
+				if x, ok := l[b]; ok {
+					keep[b] = x
+				}
+			}
+			g = seriesKey("", keep)
 		}
-		first = false
+		groups[g] = append(groups[g], v)
 	}
-	if a.op == "avg" {
-		r /= float64(len(in))
+	out := vec{}
+	for g, vs := range groups {
+		r := vs[0]
+		for _, v := range vs[1:] {
+			switch a.op {
+			case "sum", "avg":
+				r += v
+			case "max":
+				r = math.Max(r, v)
+			case "min":
+				r = math.Min(r, v)
+			}
+		}
+		if a.op == "avg" {
+			r /= float64(len(vs))
+		}
+		out[g] = r
 	}
-	return vec{"": r}
+	return out
+}
+
+// histq is histogram_quantile, as Prometheus computes it: within each group of buckets
+// (series alike but for "le"), find the bucket the rank falls in and interpolate linearly
+// inside it. No observations in the step gives no value, which draws as a gap.
+type histq struct {
+	q  float64
+	in node
+}
+
+func (h histq) eval(s []snapshot, i int) vec {
+	type bucket struct{ le, n float64 }
+	groups := map[string][]bucket{}
+	for k, v := range h.in.eval(s, i) {
+		_, l := splitKey(k)
+		le, err := strconv.ParseFloat(l["le"], 64)
+		if err != nil {
+			continue
+		}
+		delete(l, "le")
+		g := seriesKey("", l)
+		groups[g] = append(groups[g], bucket{le, v})
+	}
+	out := vec{}
+	for g, bs := range groups {
+		sort.Slice(bs, func(a, b int) bool { return bs[a].le < bs[b].le })
+		total := bs[len(bs)-1].n
+		if !math.IsInf(bs[len(bs)-1].le, 1) || total <= 0 {
+			continue
+		}
+		rank := h.q * total
+		lo, below := 0.0, 0.0
+		for j, b := range bs {
+			if b.n >= rank {
+				if math.IsInf(b.le, 1) {
+					out[g] = bs[j-1].le // the top bucket has no upper edge
+				} else {
+					out[g] = lo + (b.le-lo)*(rank-below)/(b.n-below)
+				}
+				break
+			}
+			lo, below = b.le, b.n
+		}
+	}
+	return out
 }
 
 type binop struct {
@@ -424,6 +539,8 @@ func (b binop) eval(s []snapshot, i int) vec {
 			return x * y
 		case '/':
 			return x / y
+		case '^':
+			return math.Pow(x, y)
 		}
 		return math.NaN()
 	}
@@ -438,20 +555,44 @@ func (b binop) eval(s []snapshot, i int) vec {
 		for k, v := range l {
 			out[k] = apply(v, rs)
 		}
-	default: // series with series: match on the same key
+	default: // series with series: match on labels, not the metric name, as PromQL does
+		rs := make(map[string]float64, len(r))
+		for k, w := range r {
+			rs[dropName(k)] = w
+		}
 		for k, v := range l {
-			if w, ok := r[k]; ok {
-				out[k] = apply(v, w)
+			if w, ok := rs[dropName(k)]; ok {
+				out[dropName(k)] = apply(v, w)
 			}
 		}
 	}
 	return out
 }
 
-// parseLive is a small recursive-descent parser for the subset above.
+// orOf is PromQL's `or`: every series on the left, plus those on the right whose key the
+// left lacks. For two aggregates it reads "the left if it has a value, else the right".
+type orOf struct{ l, r node }
+
+func (o orOf) eval(s []snapshot, i int) vec {
+	out := vec{}
+	for k, v := range o.l.eval(s, i) {
+		if !math.IsNaN(v) {
+			out[k] = v
+		}
+	}
+	for k, v := range o.r.eval(s, i) {
+		if _, ok := out[k]; !ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// parseLive is a small recursive-descent parser for the subset above, plus `or`, `^` and
+// vector(n), which the packs use for fallbacks between exporter versions and for units.
 func parseLive(expr string) (node, error) {
 	p := &lparser{s: expr}
-	n, err := p.expr()
+	n, err := p.or()
 	if err != nil {
 		return nil, err
 	}
@@ -470,6 +611,27 @@ type lparser struct {
 func (p *lparser) space() {
 	for p.i < len(p.s) && (p.s[p.i] == ' ' || p.s[p.i] == '\t' || p.s[p.i] == '\n') {
 		p.i++
+	}
+}
+
+func (p *lparser) or() (node, error) {
+	l, err := p.expr()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		p.space()
+		rest := p.s[p.i:]
+		if strings.HasPrefix(rest, "or") && len(rest) > 2 && (rest[2] == ' ' || rest[2] == '(') {
+			p.i += 2
+			r, err := p.expr()
+			if err != nil {
+				return nil, err
+			}
+			l = orOf{l, r}
+			continue
+		}
+		return l, nil
 	}
 }
 
@@ -495,7 +657,7 @@ func (p *lparser) expr() (node, error) {
 }
 
 func (p *lparser) term() (node, error) {
-	l, err := p.factor()
+	l, err := p.power()
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +666,7 @@ func (p *lparser) term() (node, error) {
 		if p.i < len(p.s) && (p.s[p.i] == '*' || p.s[p.i] == '/') {
 			op := p.s[p.i]
 			p.i++
-			r, err := p.factor()
+			r, err := p.power()
 			if err != nil {
 				return nil, err
 			}
@@ -512,6 +674,61 @@ func (p *lparser) term() (node, error) {
 			continue
 		}
 		return l, nil
+	}
+}
+
+// power binds tighter than * and /, and to the right, as in PromQL: 2^3^2 is 2^9.
+func (p *lparser) power() (node, error) {
+	l, err := p.factor()
+	if err != nil {
+		return nil, err
+	}
+	p.space()
+	if p.i < len(p.s) && p.s[p.i] == '^' {
+		p.i++
+		r, err := p.power()
+		if err != nil {
+			return nil, err
+		}
+		return binop{'^', l, r}, nil
+	}
+	return l, nil
+}
+
+// byClause reads an optional "by (a, b)". "without" is outside the subset.
+func (p *lparser) byClause() ([]string, bool, error) {
+	p.space()
+	rest := p.s[p.i:]
+	if strings.HasPrefix(rest, "without") {
+		return nil, false, fmt.Errorf("live: without is unsupported")
+	}
+	if !strings.HasPrefix(rest, "by") || len(rest) < 3 || (rest[2] != ' ' && rest[2] != '(') {
+		return nil, false, nil
+	}
+	p.i += 2
+	p.space()
+	if p.i >= len(p.s) || p.s[p.i] != '(' {
+		return nil, false, fmt.Errorf("live: by needs (")
+	}
+	p.i++
+	var labels []string
+	for {
+		p.space()
+		if p.i < len(p.s) && p.s[p.i] == ')' {
+			p.i++
+			p.space()
+			return labels, true, nil
+		}
+		l := nameRe.FindString(p.s[p.i:])
+		if l == "" || !strings.HasPrefix(p.s[p.i:], l) {
+			return nil, false, fmt.Errorf("live: bad label in by at %q", p.s[p.i:])
+		}
+		labels = append(labels, l)
+		p.i += len(l)
+		p.space()
+		if p.i < len(p.s) && p.s[p.i] == ',' {
+			p.i++
+		}
 	}
 }
 
@@ -524,7 +741,7 @@ func (p *lparser) factor() (node, error) {
 	}
 	if p.s[p.i] == '(' {
 		p.i++
-		n, err := p.expr()
+		n, err := p.or()
 		if err != nil {
 			return nil, err
 		}
@@ -547,18 +764,71 @@ func (p *lparser) factor() (node, error) {
 	p.i += len(id)
 	p.space()
 	switch id {
-	case "rate", "sum", "avg", "max", "min":
+	case "vector":
 		if p.i >= len(p.s) || p.s[p.i] != '(' {
-			return nil, fmt.Errorf("live: %s needs (", id)
+			return nil, fmt.Errorf("live: vector needs (")
 		}
 		p.i++
-		inner, err := p.expr()
+		p.space()
+		m := numRe.FindString(p.s[p.i:])
+		if m == "" {
+			return nil, fmt.Errorf("live: vector takes a number")
+		}
+		p.i += len(m)
+		p.space()
+		if p.i >= len(p.s) || p.s[p.i] != ')' {
+			return nil, fmt.Errorf("live: vector: missing )")
+		}
+		p.i++
+		v, _ := strconv.ParseFloat(m, 64)
+		return num(v), nil
+	case "histogram_quantile":
+		if p.i >= len(p.s) || p.s[p.i] != '(' {
+			return nil, fmt.Errorf("live: histogram_quantile needs (")
+		}
+		p.i++
+		p.space()
+		m := numRe.FindString(p.s[p.i:])
+		if m == "" {
+			return nil, fmt.Errorf("live: histogram_quantile takes a number first")
+		}
+		p.i += len(m)
+		p.space()
+		if p.i >= len(p.s) || p.s[p.i] != ',' {
+			return nil, fmt.Errorf("live: histogram_quantile: missing ,")
+		}
+		p.i++
+		inner, err := p.or()
 		if err != nil {
 			return nil, err
 		}
 		p.space()
 		if p.i >= len(p.s) || p.s[p.i] != ')' {
-			return nil, fmt.Errorf("live: %s: unsupported (a range or by clause?)", id)
+			return nil, fmt.Errorf("live: histogram_quantile: missing )")
+		}
+		p.i++
+		q, _ := strconv.ParseFloat(m, 64)
+		return histq{q, inner}, nil
+	case "rate", "sum", "avg", "max", "min":
+		var by []string
+		if id != "rate" { // sum by (a, b) (x)
+			if b, ok, err := p.byClause(); err != nil {
+				return nil, err
+			} else if ok {
+				by = b
+			}
+		}
+		if p.i >= len(p.s) || p.s[p.i] != '(' {
+			return nil, fmt.Errorf("live: %s needs (", id)
+		}
+		p.i++
+		inner, err := p.or()
+		if err != nil {
+			return nil, err
+		}
+		p.space()
+		if p.i >= len(p.s) || p.s[p.i] != ')' {
+			return nil, fmt.Errorf("live: %s: unsupported (a range window?)", id)
 		}
 		p.i++
 		if id == "rate" {
@@ -568,7 +838,14 @@ func (p *lparser) factor() (node, error) {
 			}
 			return rateOf{sel}, nil
 		}
-		return agg{id, inner}, nil
+		if by == nil { // sum(x) by (a, b)
+			if b, ok, err := p.byClause(); err != nil {
+				return nil, err
+			} else if ok {
+				by = b
+			}
+		}
+		return agg{id, inner, by}, nil
 	}
 	sel := selector{name: id}
 	if p.i < len(p.s) && p.s[p.i] == '{' {

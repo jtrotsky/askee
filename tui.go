@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -74,10 +75,15 @@ func (s *screen) box(x0, y0, x1, y1 int, title, sub string, legend []legendItem)
 		title = string([]rune(title)[:max-1]) + "…"
 	}
 	x := s.text(x0+2, y0, " "+title+" ", th.Title, true)
-	// sub is "[range] so-what": the range tag always shows; the so-what only if it fits
+	// sub is "[range] so-what": the range tag always shows; the so-what only if it fits.
+	// A leading "!" marks a range other than the selected one, drawn in accent.
 	tag, rest, _ := strings.Cut(sub, " ")
+	ink := th.Dim
+	if t, ok := strings.CutPrefix(tag, "!"); ok {
+		tag, ink = t, th.Accent
+	}
 	if tag != "" {
-		x = s.text(x, y0, tag+" ", th.Dim, false)
+		x = s.text(x, y0, tag+" ", ink, false)
 	}
 	if rest != "" && x+len([]rune(rest))+2 < x1-24 {
 		x = s.text(x, y0, rest+" ", th.Dim, false)
@@ -134,10 +140,12 @@ func (s *screen) flush(out *bufio.Writer, truecolor bool) {
 func fmtVal(v float64) string {
 	a := math.Abs(v)
 	switch {
+	case a >= 1e9: // past 10,000, currency style: K, M, B, three significant figures
+		return sig3(v/1e9) + "B"
 	case a >= 1e6:
-		return fmt.Sprintf("%.2fM", v/1e6)
+		return sig3(v/1e6) + "M"
 	case a >= 1e4:
-		return fmt.Sprintf("%.1fk", v/1e3)
+		return sig3(v/1e3) + "K"
 	case a >= 1000:
 		return fmt.Sprintf("%d,%03d", int(v)/1000, int(math.Abs(v))%1000) // thousands separator (Wei)
 	case a >= 100:
@@ -340,9 +348,9 @@ func drawLineArea(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64, xA
 		col[i], val[i] = c, v
 	}
 	t0, t1 := float64(m.start.Unix()), float64(m.end.Unix())
-	gap := 3 * m.step.Seconds()
 	var legend []legendItem
 	for si, se := range ss {
+		gap := seriesGap(se, m.step)
 		c := th.Palette[si%len(th.Palette)]
 		if th.Mono || th.Dashed {
 			mask = dashMasks[si%len(dashMasks)]
@@ -523,6 +531,22 @@ func drawText(s *screen, m model, x0, y0, x1, y1 int) {
 	}
 }
 
+// seriesGap is how far apart two points may be and still be joined: three steps, or one and a
+// half of the series' own sampling interval if that is longer — a daily figure drawn on a
+// six-hour step is not missing between days.
+func seriesGap(se series, step time.Duration) float64 {
+	var d []float64
+	for i := 1; i < len(se.t); i++ {
+		d = append(d, se.t[i]-se.t[i-1])
+	}
+	g := 3 * step.Seconds()
+	if len(d) > 0 {
+		sort.Float64s(d)
+		g = math.Max(g, 1.5*d[len(d)/2])
+	}
+	return g
+}
+
 func abs(a int) int {
 	if a < 0 {
 		return -a
@@ -543,11 +567,17 @@ func sign(a int) int {
 func panel(s *screen, cfg *Config, p page, m model, x0, y0, x1, y1 int, rangeName string) {
 	th := s.th
 	title := p.Title
-	tag := rangeName
-	if p.Range != "" {
-		tag = p.Range
+	tag := m.rng
+	if tag == "" {
+		tag = rangeName
 	}
 	sub := "[" + tag + "]"
+	if rangeName == "live" && tag != "live" {
+		sub = "[" + tag + " · not live]"
+	}
+	if _, ok := rangeByName(tag); ok && tag != rangeName {
+		sub = "!" + sub // not the selected range: box draws the tag in accent
+	}
 	switch {
 	case m.err != nil:
 		s.box(x0, y0, x1, y1, title, sub, nil)
@@ -575,18 +605,28 @@ type deck struct {
 	ri    int
 	ti    int
 	mu    sync.Mutex
+	modes map[string]groupMode
 	cache map[string]model
 	when  map[string]time.Time
 	busy  bool
 }
 
-func (d *deck) key() string {
-	p := d.pages[d.cur]
-	r := ranges[d.ri].name
-	if p.Range != "" {
-		r = p.Range
+// rng is the range the current page shows: the selected one, raised to its group's floor.
+func (d *deck) rng() rng {
+	g := d.pages[d.cur].Group
+	if d.modes == nil {
+		d.modes = map[string]groupMode{}
 	}
-	return fmt.Sprintf("%d|%s", d.cur, r)
+	m, ok := d.modes[g]
+	if !ok {
+		m = modeOf(groupPages(d.pages, g))
+		d.modes[g] = m
+	}
+	return m.clamp(ranges[d.ri])
+}
+
+func (d *deck) key() string {
+	return fmt.Sprintf("%d|%s", d.cur, d.rng().name)
 }
 
 func (d *deck) get() (model, bool, bool) {
@@ -594,11 +634,7 @@ func (d *deck) get() (model, bool, bool) {
 	defer d.mu.Unlock()
 	k := d.key()
 	m, ok := d.cache[k]
-	r := ranges[d.ri]
-	if d.pages[d.cur].Range != "" {
-		r, _ = rangeByName(d.pages[d.cur].Range)
-	}
-	return m, ok, ok && time.Since(d.when[k]) < ttl(r) // the same cadence as the web face
+	return m, ok, ok && time.Since(d.when[k]) < ttl(d.rng()) // the same cadence as the web face
 }
 
 func (d *deck) load(force bool, redraw chan<- struct{}) {
@@ -611,7 +647,7 @@ func (d *deck) load(force bool, redraw chan<- struct{}) {
 		return
 	}
 	d.busy = true
-	k, p, r := d.key(), d.pages[d.cur], ranges[d.ri]
+	k, p, r := d.key(), d.pages[d.cur], d.rng()
 	d.mu.Unlock()
 	go func() {
 		m := p.fetch(r)
@@ -650,12 +686,17 @@ func (d *deck) render(w, h int) *screen {
 	x = s.text(x+2, 0, d.cfg.groupTitle(p.Group), th.Accent, true)
 	x = s.text(x+1, 0, fmt.Sprintf("%d/%d", d.cur+1, len(d.pages)), th.Dim, false)
 	rx := x + 2
-	for i, r := range ranges {
-		c, b := th.Dim, false
-		if i == d.ri {
+	eff := d.rng()
+	floor, _ := rangeByName(d.modes[p.Group].Min)
+	for _, r := range ranges {
+		c, b, name := th.Dim, false, r.name
+		switch {
+		case d.modes[p.Group].Min == "" || r.span < floor.span:
+			name = strings.Repeat(" ", len(name)) // below what this group can show
+		case r.name == eff.name:
 			c, b = th.Accent, true
 		}
-		rx = s.text(rx, 0, " "+r.name+" ", c, b)
+		rx = s.text(rx, 0, " "+name+" ", c, b)
 	}
 	tn := "theme: " + th.Name
 	switch th.Status {
@@ -674,7 +715,7 @@ func (d *deck) render(w, h int) *screen {
 	} else {
 		// live, as btm does it: the chart does not slide between samples. Each refetch repaints
 		// it with the right edge at the newest sample, so it changes in one step or not at all.
-		panel(s, d.cfg, p, m, 0, 1, w-1, h-3, ranges[d.ri].name)
+		panel(s, d.cfg, p, m, 0, 1, w-1, h-3, eff.name)
 	}
 	prev, next := "", ""
 	if d.cur > 0 {

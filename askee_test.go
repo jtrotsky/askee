@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -93,6 +94,38 @@ func TestLiveOnlyForLivePages(t *testing.T) {
 	m = page{Kind: "line", Series: []SeriesCfg{{Expr: "x", Name: "x"}}, cfg: exampleConfig(t)}.fetch(live)
 	if m.rng != "1h" {
 		t.Errorf("non-live page in the live view drew %q, want 1h", m.rng)
+	}
+}
+
+// A page with min_range follows the selected range but never draws less than its minimum,
+// and every header names what is actually drawn, not what was selected.
+func TestDrawnRange(t *testing.T) {
+	r := func(n string) rng { x, _ := rangeByName(n); return x }
+	daily := page{PageCfg: PageCfg{Kind: "line", MinRange: "7d"}}
+	for sel, want := range map[string]string{"live": "7d", "1h": "7d", "24h": "7d", "7d": "7d", "30d": "30d", "90d": "90d"} {
+		if got := daily.tag(r(sel)); got != want {
+			t.Errorf("min_range 7d at %s drew %s, want %s", sel, got, want)
+		}
+	}
+	for _, c := range []struct {
+		p    PageCfg
+		sel  string
+		want string
+	}{
+		{PageCfg{Kind: "line", Range: "90d"}, "1h", "90d"},
+		{PageCfg{Kind: "line"}, "6h", "6h"},
+		{PageCfg{Kind: "line"}, "live", "1h"},
+		{PageCfg{Kind: "line", Live: true}, "live", "live"},
+		{PageCfg{Kind: "hour"}, "1h", "30d"},
+		{PageCfg{Kind: "hour", Range: "90d"}, "live", "90d"},
+		{PageCfg{Kind: "instant", Expr: "increase(x[$__range])"}, "30d", "30d"},
+		{PageCfg{Kind: "instant"}, "1h", "now"},
+		{PageCfg{Kind: "instant", Range: "now"}, "1h", "now"},
+		{PageCfg{Kind: "snapshot"}, "1h", "snapshot"},
+	} {
+		if got := (page{PageCfg: c.p}).tag(r(c.sel)); got != c.want {
+			t.Errorf("%+v at %s: tag %s, want %s", c.p, c.sel, got, c.want)
+		}
 	}
 }
 
@@ -206,7 +239,7 @@ func TestLiveEvaluator(t *testing.T) {
 			t.Errorf("%s = %v, want %v", expr, got, want)
 		}
 	}
-	for _, bad := range []string{`rate(x[5m])`, `sum by (a) (x)`, `histogram_quantile(0.5, x)`} {
+	for _, bad := range []string{`rate(x[5m])`, `sum without (a) (x)`, `label_replace(x, "a", "b", "c", "d")`} {
 		if _, err := parseLive(bad); err == nil {
 			t.Errorf("%s: should fall back to the database", bad)
 		}
@@ -235,6 +268,201 @@ func TestDatabaseOutageKeepsLastGood(t *testing.T) {
 		}
 		if tl.Kind == "line" && !strings.Contains(tl.Note, "as of") {
 			t.Errorf("%s: stale data must say how old it is (note %q)", tl.ID, tl.Note)
+		}
+	}
+}
+
+// A series with no data reaches the browser as [], not null (null broke the whole group).
+func TestEmptySeriesIsArray(t *testing.T) {
+	tl := toTile(page{PageCfg: PageCfg{ID: "x", Kind: "line"}}, model{kind: "line", series: []series{{name: "waiting"}}})
+	b, _ := json.Marshal(tl)
+	if !strings.Contains(string(b), `"t":[]`) || strings.Contains(string(b), "null") {
+		t.Errorf("empty series: %s", b)
+	}
+}
+
+// Editing the catalogue reloads it: a new group appears and the generation bumps. A file that
+// does not load leaves the running catalogue in place.
+func TestConfigReload(t *testing.T) {
+	fakeVM(t)
+	dir := t.TempDir()
+	path := dir + "/askee.json"
+	write := func(s string) {
+		if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	one := `{"vm":"` + vmBase + `","groups":[{"id":"a","title":"A"}],"pages":[{"id":"p1","group":"a","kind":"line","series":[{"expr":"x","name":"x"}]}]}`
+	write(one)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cur atomic.Pointer[served]
+	cur.Store(newServed(cfg, 1))
+	h := handler(&cur)
+	meta := func() (gen float64, groups int) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/meta", nil))
+		var m struct {
+			Gen    float64 `json:"gen"`
+			Groups []any   `json:"groups"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &m)
+		return m.Gen, len(m.Groups)
+	}
+	if g, n := meta(); g != 1 || n != 1 {
+		t.Fatalf("start: gen %v groups %d", g, n)
+	}
+	two := `{"vm":"` + vmBase + `","groups":[{"id":"a","title":"A"},{"id":"b","title":"B"}],"pages":[` +
+		`{"id":"p1","group":"a","kind":"line","series":[{"expr":"x","name":"x"}]},` +
+		`{"id":"p2","group":"b","kind":"line","series":[{"expr":"y","name":"y"}]}]}`
+	write(two)
+	if err := reloadConfig(path, "", &cur); err != nil {
+		t.Fatal(err)
+	}
+	if g, n := meta(); g != 2 || n != 2 {
+		t.Fatalf("after reload: gen %v groups %d, want 2 and 2", g, n)
+	}
+	write(`{"groups": [`) // a half-saved edit
+	if err := reloadConfig(path, "", &cur); err == nil {
+		t.Fatal("a broken file must not load")
+	}
+	if g, n := meta(); g != 2 || n != 2 {
+		t.Fatalf("broken edit replaced the catalogue: gen %v groups %d", g, n)
+	}
+}
+
+func TestCopyRules(t *testing.T) {
+	ok := []PageCfg{
+		{ID: "a", Title: "Free space on /", Info: "One sentence, with a clause, at 105 °C and 2–12 h."},
+		{ID: "b", Subtitle: "Old key, still read.", Note: "last 30 days"},
+	}
+	bad := []PageCfg{
+		{ID: "c", Info: "First sentence. Second sentence."},
+		{ID: "d", Info: "x", Subtitle: "y"},
+		{ID: "e", Note: "bedroom and study read at the heat pump, high on the wall"},
+		{ID: "f", Note: "Short. Two."},
+		{ID: "g", Info: "One clause; then another."},
+		{ID: "h", Info: "One clause — then another."},
+		{ID: "i", Title: "Growth, 30 days"},
+	}
+	for _, p := range ok {
+		p.Group, p.Kind = "g", "line"
+		c, err := finishConfig(&Config{Packs: []string{}, Pages: []PageCfg{p}})
+		if err != nil {
+			t.Errorf("%s: %v", p.ID, err)
+		} else if c.Pages[0].Info == "" || c.Pages[0].Subtitle != "" {
+			t.Errorf("%s: info %q subtitle %q after load", p.ID, c.Pages[0].Info, c.Pages[0].Subtitle)
+		}
+	}
+	for _, p := range bad {
+		p.Group, p.Kind = "g", "line"
+		if _, err := finishConfig(&Config{Packs: []string{}, Pages: []PageCfg{p}}); err == nil {
+			t.Errorf("%s: loaded, want a copy-rule error", p.ID)
+		}
+	}
+}
+
+// Each tab's floor is the longest of its charts' shortest ranges; it is live only when every
+// chart that covers a stretch of time can be; readings do not count either way.
+func TestGroupMode(t *testing.T) {
+	cfg := &Config{LiveSource: "http://x/metrics"}
+	pg := func(c PageCfg) page { return page{PageCfg: c, cfg: cfg} }
+	liveLine := pg(PageCfg{Kind: "line", Live: true})
+	dbLine := pg(PageCfg{Kind: "line"})
+	daily := pg(PageCfg{Kind: "line", MinRange: "7d"})
+	reading := pg(PageCfg{Kind: "snapshot"})
+	for _, c := range []struct {
+		name string
+		ps   []page
+		want groupMode
+	}{
+		{"all live", []page{liveLine, liveLine, reading}, groupMode{Min: "live", Live: true}},
+		{"mixed", []page{liveLine, dbLine}, groupMode{Min: "1h", Mixed: true}},
+		{"delayed", []page{dbLine, daily, reading}, groupMode{Min: "7d"}},
+		{"readings", []page{reading}, groupMode{}},
+	} {
+		if got := modeOf(c.ps); got != c.want {
+			t.Errorf("%s: %+v, want %+v", c.name, got, c.want)
+		}
+	}
+	r, _ := rangeByName("1h")
+	if got := (groupMode{Min: "7d"}).clamp(r).name; got != "7d" {
+		t.Errorf("clamp 1h to a 7d floor: %s", got)
+	}
+}
+
+func TestCheckTime(t *testing.T) {
+	bad := []PageCfg{
+		{ID: "a", Kind: "line", Range: "30d"},
+		{ID: "b", Kind: "snapshot", MinRange: "7d"},
+		{ID: "c", Kind: "hour", Live: true},
+		{ID: "d", Kind: "line", Live: true, Series: []SeriesCfg{{Expr: `label_replace(x, "a", "b", "c", "d")`}}},
+	}
+	for _, p := range bad {
+		if checkTime(page{PageCfg: p}) == nil {
+			t.Errorf("%s: passed, want an error", p.ID)
+		}
+	}
+	ok := PageCfg{ID: "e", Kind: "line", Live: true, Series: []SeriesCfg{{Expr: "(sum(a) or vector(0)) / 2^30"}}}
+	if err := checkTime(page{PageCfg: ok}); err != nil {
+		t.Errorf("e: %v", err)
+	}
+}
+
+// or, vector() and ^ in the live evaluator, and series matched on labels, not names.
+func TestLiveOrPowVector(t *testing.T) {
+	snap := func(v map[string]float64) snapshot { return snapshot{t: time.Now(), v: v} }
+	s := []snapshot{snap(map[string]float64{
+		seriesKey("a", map[string]string{"d": "x"}): 6,
+		seriesKey("b", map[string]string{"d": "x"}): 2,
+	})}
+	for expr, want := range map[string]float64{
+		"sum(missing) or vector(7)": 7,
+		"sum(a) or vector(7)":       6,
+		"sum(a) / 2^1":              3,
+		"2^3^2":                     512,
+		"sum(a - b)":                4,
+	} {
+		n, err := parseLive(expr)
+		if err != nil {
+			t.Fatalf("%s: %v", expr, err)
+		}
+		if got := n.eval(s, 0)[""]; got != want {
+			t.Errorf("%s = %v, want %v", expr, got, want)
+		}
+	}
+}
+
+// sum by (...) and histogram_quantile in the live evaluator, checked against values worked by
+// hand the way Prometheus computes them.
+func TestLiveByAndQuantile(t *testing.T) {
+	k := func(name string, l map[string]string) string { return seriesKey(name, l) }
+	s := []snapshot{{time.Now(), map[string]float64{
+		k("resp", map[string]string{"type": "A", "c": "1"}): 1,
+		k("resp", map[string]string{"type": "A", "c": "2"}): 2,
+		k("resp", map[string]string{"type": "B", "c": "1"}): 4,
+		k("h_bucket", map[string]string{"le": "0.1"}):       50,
+		k("h_bucket", map[string]string{"le": "0.2"}):       90,
+		k("h_bucket", map[string]string{"le": "+Inf"}):      100,
+	}}}
+	for expr, want := range map[string]map[string]float64{
+		"sum by (type) (resp)":                            {k("", map[string]string{"type": "A"}): 3, k("", map[string]string{"type": "B"}): 4},
+		"sum(resp) by (type)":                             {k("", map[string]string{"type": "A"}): 3, k("", map[string]string{"type": "B"}): 4},
+		"histogram_quantile(0.5, sum(h_bucket) by (le))":  {"": 0.1},
+		"histogram_quantile(0.7, sum(h_bucket) by (le))":  {"": 0.15},
+		"histogram_quantile(0.99, sum(h_bucket) by (le))": {"": 0.2},
+	} {
+		n, err := parseLive(expr)
+		if err != nil {
+			t.Fatalf("%s: %v", expr, err)
+		}
+		got := n.eval(s, 0)
+		for key, w := range want {
+			if math.Abs(got[key]-w) > 1e-9 {
+				t.Errorf("%s: %q = %v, want %v (all: %v)", expr, key, got[key], w, got)
+			}
 		}
 	}
 }

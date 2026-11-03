@@ -13,16 +13,39 @@
   * { box-sizing:border-box; }
   html,body { margin:0; height:100%; background:var(--surface); color:var(--text);
               font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-  header { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; padding:8px 10px;
-           border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--surface); z-index:2; }
+  /* Top row: the server and its groups on the left, the time range on the right. The row under
+     it sits on the panels: the pager centred, when the last update was on the right. Both
+     stick to the top together. */
+  #top { position:sticky; top:0; z-index:2; background:var(--surface); border-bottom:1px solid var(--border); }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; padding:8px 10px 4px; }
+  /* the page control sits in the header, beside the time range it belongs with, not on top of
+     the charts; the row under the header carries only when the data was last updated */
+  .bar { display:flex; justify-content:flex-end; padding:0 10px 6px; min-height:4px; }
+  header .pager { margin-left:auto; margin-right:6px; display:flex; align-items:center; gap:4px; color:var(--dim); }
+  header .pager button { padding:3px 6px; }
   .brand { color:var(--title); font-weight:700; }
   nav, .ranges { display:flex; flex-wrap:wrap; gap:4px; }
   button { background:none; border:1px solid var(--border); color:var(--dim); font:inherit;
            padding:3px 9px; border-radius:3px; cursor:pointer; }
   button.on { color:var(--accent); border-color:var(--accent); font-weight:700; }
   button:hover { color:var(--text); }
-  select { background:var(--panel); color:var(--text); border:1px solid var(--border); font:inherit; padding:3px 6px; border-radius:3px; }
-  .stamp { margin-left:auto; color:var(--dim); }
+  /* a range this tab cannot show: there, but out of reach */
+  button:disabled, button:disabled:hover { opacity:.35; cursor:default; color:var(--dim); }
+  /* a tab whose every chart can go live carries a small dot */
+  nav button.live::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%;
+                            background:currentColor; margin-right:6px; vertical-align:1px; }
+  .stamp { color:var(--dim); }
+  /* the help button is deliberately quiet: a bare "?" until hovered */
+  #help { border-color:transparent; padding:1px 7px; border-radius:50%; }
+  #help:hover, #help.on { border-color:var(--border); color:var(--text); font-weight:400; }
+  #helpbox { position:fixed; right:10px; z-index:5; background:var(--panel); border:1px solid var(--border);
+             border-radius:4px; padding:10px 12px; font-size:12px; max-width:min(380px, calc(100vw - 20px)); }
+  #helpbox table { border-collapse:collapse; }
+  #helpbox td { padding:1px 0; vertical-align:top; }
+  #helpbox td:first-child { color:var(--accent); padding-right:14px; white-space:nowrap; }
+  #helpbox .tl { color:var(--dim); margin:8px 0 4px; }
+  #helpbox .tset { display:flex; flex-wrap:wrap; gap:4px; }
+  #helpbox .tset button { padding:1px 7px; font-size:12px; }
   main { display:grid; gap:var(--gap); padding:var(--gap); grid-template-columns:repeat(var(--cols,2), minmax(0,1fr)); grid-auto-rows:var(--cellh,300px); grid-auto-flow:row dense; }
   .body { overflow-y:auto; }
   .pager { display:flex; gap:4px; align-items:center; color:var(--dim); }
@@ -31,6 +54,7 @@
   .tile h2 { margin:0; padding:6px 10px 0; font-size:13px; color:var(--title); font-weight:700;
              white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tile h2 small { color:var(--dim); font-weight:400; margin-left:6px; }
+  .tile h2 small.off { color:var(--accent); }
   .tile .why { color:var(--dim); font-weight:400; margin-left:6px; cursor:help; }
   .tile .why:hover, .tile .why:focus { color:var(--text); outline:none; }
   .tile .sub { display:none; position:absolute; left:8px; right:8px; top:26px; z-index:3; padding:5px 8px;
@@ -47,24 +71,49 @@
 </style>
 </head>
 <body>
-<header>
-  <div class="brand" id="brand">askee</div>
-  <nav id="groups"></nav>
-  <div class="ranges" id="ranges"></div>
-  <div class="pager" id="pager"></div>
-  <select id="themes" title="theme (t cycles)"></select>
-  <div class="stamp" id="stamp"></div>
-</header>
+<div id="top">
+  <header>
+    <div class="brand" id="brand">askee</div>
+    <nav id="groups"></nav>
+    <div class="pager" id="pager"></div>
+    <div class="ranges" id="ranges"></div>
+    <button id="help" title="keys and themes (?)" aria-label="keys and themes" aria-expanded="false">?</button>
+  </header>
+  <div class="bar">
+    <div class="stamp" id="stamp"></div>
+  </div>
+</div>
+<div id="helpbox" hidden>
+  <table>
+    <tr><td>← →</td><td>previous / next group (swipe on a phone)</td></tr>
+    <tr><td>↑ ↓</td><td>previous / next page</td></tr>
+    <tr><td>1 – 7</td><td>time range: live, 1h … 90d (greyed out where a tab's data cannot show it)</td></tr>
+    <tr><td>t</td><td>next theme</td></tr>
+    <tr><td>a</td><td>automatic theme (follows the system)</td></tr>
+    <tr><td>?</td><td>this help · Esc closes</td></tr>
+  </table>
+  <div class="tl">theme</div>
+  <div class="tset" id="themeset"></div>
+</div>
 <main id="grid"></main>
 <script>
 "use strict";
 let META = null, TH = null, PAL = [], SEQ = [], cur = 0, page = 0, pages = [[]], range = "24h", data = null, timer = null, themeChoice = "auto";
+// pick is the range the reader chose; range is what the current tab shows: pick, raised to the
+// tab's floor (the shortest range every chart in it can show). Moving to a tab with a higher
+// floor shows that floor; moving back returns to the pick.
+let pick = "24h";
+const rix = r => META.ranges.indexOf(r);
+function rangeFor(g) { const m = META.groups[g].min; return m && rix(pick) < rix(m) ? m : pick; }
 const $ = id => document.getElementById(id);
 
 function fmt(v) {
   const a = Math.abs(v);
-  if (a >= 1e6) return (v/1e6).toFixed(2) + "M";
-  if (a >= 1e4) return (v/1e3).toFixed(1) + "k";
+  // past 10,000, currency style: K, M, B with three significant figures (10.5K, 1.07M, 2.40B)
+  const s3 = x => Math.abs(x) >= 100 ? x.toFixed(0) : Math.abs(x) >= 10 ? x.toFixed(1) : x.toFixed(2);
+  if (a >= 1e9) return s3(v/1e9) + "B";
+  if (a >= 1e6) return s3(v/1e6) + "M";
+  if (a >= 1e4) return s3(v/1e3) + "K";
   if (a >= 1000) return Math.round(v).toLocaleString("en-NZ");   // thousands separator
   if (a >= 100) return v.toFixed(0);
   if (a >= 10) return v.toFixed(1);
@@ -113,14 +162,16 @@ function applyTheme(id) {
 // height (a tile is never squeezed below MIN_TILE px). Each chart takes [cols, rows] cells —
 // from the config's span, or worked out from how many bars or lines it must show at a
 // readable size. Charts are packed in order into pages of cols × rows cells: ↑/↓ moves
-// between pages, ←/→ between groups. On a phone (one column) the page simply scrolls.
+// between pages, ←/→ between groups. On a phone (one column) the page simply scrolls, and
+// nothing about the layout depends on the window's height: a phone's address bar shows and
+// hides as the reader scrolls, and a layout tied to it would rebuild under their thumb.
 const MIN_TILE = 250, GAP = 8, BAR_ROW = 15, TEXT_ROW = 16;
 function geometry() {
-  const w = innerWidth, h = innerHeight - document.querySelector("header").offsetHeight - GAP;
+  const w = innerWidth, h = innerHeight - $("top").offsetHeight - GAP;
   const cols = w >= 1700 ? 3 : w >= 820 ? 2 : 1;
   const phone = cols === 1;
   const rows = phone ? 999 : Math.max(1, Math.floor((h + GAP) / (MIN_TILE + GAP)));
-  const cellH = phone ? Math.max(280, Math.round(innerHeight * 0.46)) : Math.floor((h - GAP*(rows - 1)) / rows);
+  const cellH = phone ? Math.min(440, Math.max(280, Math.round(w / 1.3))) : Math.floor((h - GAP*(rows - 1)) / rows);
   return {cols, rows, cellH, phone};
 }
 function spanOf(t, g) {
@@ -269,14 +320,25 @@ function panel(c, t, raw, b, opts) {
     }
     c.restore();
   }
-  const gap = 3 * (t.step || 60);
+  // a line breaks where data is missing: a gap of three steps, or of one and a half of the
+  // series' own sampling interval if that is longer (a daily figure is not missing between days)
+  const gapOf = s => {
+    const d = []; for (let k = 1; k < s.t.length; k++) d.push(s.t[k] - s.t[k-1]);
+    d.sort((a, b) => a - b);
+    return Math.max(3 * (t.step || 60), 1.5 * (d[d.length >> 1] || 0));
+  };
+  // a point with no neighbour on either side is drawn as a dot, so a lone reading still shows
   const path = (s, close, under) => {
-    c.beginPath(); let pen = false, last = 0, first = null, prevX = 0;
+    c.beginPath(); let pen = false, last = 0, first = null, prevX = 0, prevY = 0, n = 0;
+    const gap = gapOf(s);
+    const dot = () => { if (!close && n === 1) { c.moveTo(prevX + 1.5, prevY); c.arc(prevX, prevY, 1.5, 0, 2 * Math.PI); } };
     for (let k = 0; k < s.t.length; k++) {
       const x = X(s.t[k]), y = Y(s.v[k]);
-      if (pen && s.t[k] - last <= gap) c.lineTo(x, y); else { if (close && first !== null) { c.lineTo(prevX, T + ph); c.lineTo(first, T + ph); } c.moveTo(x, y); first = x; }
-      pen = true; last = s.t[k]; prevX = x;
+      if (pen && s.t[k] - last <= gap) { c.lineTo(x, y); n++; }
+      else { dot(); if (close && first !== null) { c.lineTo(prevX, T + ph); c.lineTo(first, T + ph); } c.moveTo(x, y); first = x; n = 1; }
+      pen = true; last = s.t[k]; prevX = x; prevY = y;
     }
+    dot();
     if (close && first !== null) { c.lineTo(prevX, T + ph); c.lineTo(first, T + ph); c.closePath(); }
   };
   const colOf = i => PAL[(opts.colour ?? i) % PAL.length];
@@ -298,6 +360,7 @@ function panel(c, t, raw, b, opts) {
       const col = colOf(i), dash = opts.split ? [] : dashOf(i);
       c.lineWidth = 2; c.lineJoin = "round"; c.setLineDash(dash);
       if (t.thermal && !TH.mono) {      // the line itself carries temperature: each segment coloured by value
+        const gap = gapOf(s);
         for (let k = 1; k < s.t.length; k++) {
           if (s.t[k] - s.t[k-1] > gap) continue;
           c.strokeStyle = thermalAt((s.v[k] + s.v[k-1]) / 2);
@@ -468,10 +531,12 @@ function anchor(t) {
 // repaint: redraw every shown tile from the new data without touching the layout. Returns
 // false when the layout has to change (a tile appeared, errored or gained data) — the caller
 // then rebuilds.
+const hasData = t => (t.series || []).some(s => s.v.length) || (t.bars || []).length > 0 || (t.blocks || []).length > 0;
 function repaint() {
   for (const e of shown.tiles) {
     const nt = data.tiles.find(x => x.id === e.id);
-    if (!nt || !!nt.err !== !!e.t.err || nt.kind !== e.kind || (!e.geo && !e.pre && !e.t.err)) return false;
+    // a tile drawn as "no data" only needs a rebuild (for its hover) once data arrives
+    if (!nt || !!nt.err !== !!e.t.err || nt.kind !== e.kind || (!e.geo && !e.pre && !e.t.err && hasData(nt))) return false;
   }
   for (const e of shown.tiles) {
     const nt = data.tiles.find(x => x.id === e.id);
@@ -495,7 +560,11 @@ function render() {
   page = Math.min(page, pages.length - 1);
   const sig = [cur, range, page, g.cols, g.cellH, TH.id, pages[page].map(p => data.tiles[p.i].id).join(",")].join("|");
   if (sig === shown.sig && repaint()) { stamp(); return; }
-  shown = {sig, tiles: []};
+  // a rebuild of the group already on screen keeps the reader where they were: hold the
+  // grid's height while it is emptied, so the page cannot collapse and throw them to the top
+  const same = shown.view === cur + "|" + range, y = scrollY;
+  if (same) grid.style.minHeight = grid.offsetHeight + "px";
+  shown = {sig, tiles: [], view: cur + "|" + range};
   document.documentElement.style.setProperty("--cols", g.cols);
   document.documentElement.style.setProperty("--cellh", g.cellH + "px");
   grid.innerHTML = "";
@@ -508,11 +577,19 @@ function render() {
     el.innerHTML = `<h2></h2><div class="sub"></div><div class="body"></div><div class="foot"></div><div class="tip"></div>`;
     // the title says what, in a few words; the "so what" waits behind the (i) until asked for
     const h2 = el.querySelector("h2"); h2.textContent = t.title;
-    const sm = document.createElement("small"); sm.textContent = [t.unit, t.fixed || t.drawn || data.range].filter(Boolean).join(" · "); h2.append(sm);
-    if (t.subtitle) {
+    // the header names the time actually shown; when that is not the selected range it says so
+    const sm = document.createElement("small"), shows = t.drawn || data.range;
+    sm.textContent = [t.unit, shows].filter(Boolean).join(" · "); h2.append(sm);
+    // on the live range, anything not drawn live says so: a live tab may hold a fixed pattern or
+    // a reading, and nobody should take it for a live line
+    if (data.range === "live" && shows !== "live") sm.textContent += " · not live";
+    if (shows !== data.range && META.ranges.includes(shows)) {
+      sm.classList.add("off"); sm.title = `Shows ${shows}, not the selected ${data.range}`;
+    }
+    if (t.info) {
       const w = document.createElement("span"); w.className = "why"; w.textContent = "ⓘ"; w.tabIndex = 0;
-      w.setAttribute("aria-label", t.subtitle); h2.append(w);
-      el.querySelector(".sub").textContent = t.subtitle;
+      w.setAttribute("aria-label", t.info); h2.append(w);
+      el.querySelector(".sub").textContent = t.info;
       let pinned = false;
       w.onmouseenter = w.onfocus = () => el.classList.add("open");
       w.onmouseleave = w.onblur = () => { if (!pinned) el.classList.remove("open"); };
@@ -551,6 +628,7 @@ function render() {
     }
   }
   stamp();
+  if (same) { scrollTo(0, y); grid.style.minHeight = ""; } else scrollTo(0, 0);
 }
 function stamp() { $("stamp").textContent = "updated " + new Date(data.generated*1000).toLocaleTimeString(undefined, {hour12:false}); }
 
@@ -590,28 +668,47 @@ function hoverBars(el, cv, t, geo) {
 function buttons() {
   const nav = $("groups"); nav.innerHTML = "";
   META.groups.forEach((g, i) => { const b = document.createElement("button"); b.textContent = g.title;
-    if (i === cur) b.className = "on"; b.onclick = () => go(i); nav.append(b); });
+    if (i === cur) b.classList.add("on");
+    if (g.live) { b.classList.add("live"); b.title = "Every chart here can show live"; }
+    b.onclick = () => go(i); nav.append(b); });
   const rs = $("ranges"); rs.innerHTML = "";
+  const g = META.groups[cur];
   META.ranges.forEach(r => { const b = document.createElement("button"); b.textContent = r;
-    if (r === range) b.className = "on"; b.onclick = () => { range = r; load(); }; rs.append(b); });
-  const ts = $("themes"); ts.innerHTML = "";
-  const ao = document.createElement("option"); ao.value = "auto";
-  ao.textContent = `theme: Auto (${sysLight.matches ? "Newsprint" : "Carbon"}, follows system)`;
-  if (themeChoice === "auto") ao.selected = true; ts.append(ao);
-  META.themes.forEach(t => {
-    const o = document.createElement("option"); o.value = t.id;
-    const tag = {validated: " ✓", floor: " ✓ (with line labels)", mono: " — print, line styles", fails: " (not colour-blind safe)"}[t.status] || "";
-    o.textContent = `theme: ${t.name}${tag}`;
-    o.title = t.note; if (themeChoice !== "auto" && TH && t.id === TH.id) o.selected = true; ts.append(o);
+    if (!g.min || rix(r) < rix(g.min)) {
+      b.disabled = true;
+      b.title = g.min ? `${g.title} starts at ${g.min}` : `${g.title} shows readings, not a stretch of time`;
+    } else if (r === range) b.className = "on";
+    b.onclick = () => { pick = r; load(); }; rs.append(b); });
+  const ts = $("themeset"); ts.innerHTML = "";
+  const tb = (id, label, title, on) => { const b = document.createElement("button"); b.textContent = label; b.title = title;
+    if (on) b.className = "on"; b.onclick = () => applyTheme(id); ts.append(b); };
+  // auto follows the system between Light and Dark; those two come next, then the rest.
+  // No ✓/✗ on the names: the colour-blind check stays in each one's hover note.
+  tb("auto", "auto (system)", `follows the system: ${sysLight.matches ? "light" : "dark"} now`, themeChoice === "auto");
+  const first = ["newsprint", "carbon"];
+  [...META.themes].sort((a, b) => (first.indexOf(b.id) >= 0) - (first.indexOf(a.id) >= 0)).forEach(t => {
+    tb(t.id, t.name, t.note + (t.status === "fails" ? " (not colour-blind safe)" : ""), themeChoice !== "auto" && TH && t.id === TH.id);
   });
-  ts.onchange = () => applyTheme(ts.value);
 }
+// The help box: hotkeys, and the themes as buttons (a phone has no "t" key).
+function toggleHelp(open) {
+  const box = $("helpbox"), btn = $("help");
+  open = open ?? box.hidden;
+  if (open) { const r = btn.getBoundingClientRect(); box.style.top = (r.bottom + 6) + "px"; }
+  box.hidden = !open; btn.classList.toggle("on", open); btn.setAttribute("aria-expanded", open);
+}
+$("help").onclick = e => { e.stopPropagation(); toggleHelp(); };
+// composedPath, not contains(): choosing a theme rebuilds the buttons, so the clicked one is
+// already detached when the click arrives here
+addEventListener("click", e => { if (!$("helpbox").hidden && !e.composedPath().includes($("helpbox"))) toggleHelp(false); });
+// The pager row is always laid out, and only hidden when there is one page, so the charts sit
+// at the same height on every tab and ←/→ never makes them jump.
 function pager() {
   const p = $("pager"); p.innerHTML = "";
-  if (pages.length < 2) return;
+  p.style.visibility = pages.length < 2 ? "hidden" : "";
   const up = document.createElement("button"); up.textContent = "▲"; up.title = "previous page (↑)"; up.onclick = () => turn(-1);
   const dn = document.createElement("button"); dn.textContent = "▼"; dn.title = "next page (↓)"; dn.onclick = () => turn(1);
-  p.append(up, `page ${page + 1}/${pages.length}`, dn);
+  p.append(up, `${page + 1}/${pages.length}`, dn);
 }
 function turn(d) { const n = Math.max(0, Math.min(pages.length - 1, page + d)); if (n !== page) { page = n; render(); } }
 // ←/→ stop at the first and last group instead of wrapping, so holding ← always lands on the
@@ -627,21 +724,35 @@ async function getGroup(g, r) {
   if (!res.ok) throw new Error(res.status + " " + res.statusText);
   const d = await res.json(); seen.set(g + "|" + r, d); return d;
 }
+// The server reloads its catalogue when the file changes (askee watches it). The first answer
+// carrying a new generation refetches the group list, keeps the reader on the same group if
+// it still exists, drops everything cached from the old catalogue, and draws again.
+async function refreshMeta() {
+  const id = META.groups[cur] && META.groups[cur].id;
+  META = await (await fetch("api/meta")).json();
+  seen.clear();
+  const i = META.groups.findIndex(g => g.id === id);
+  cur = i >= 0 ? i : Math.min(cur, META.groups.length - 1);
+  buttons(); load();
+}
 async function load() {
-  location.hash = META.groups[cur].id + "/" + range; buttons();
+  range = rangeFor(cur);
+  history.replaceState(null, "", "#" + META.groups[cur].id + "/" + range); buttons();
   const want = cur + "|" + range, g = cur, r = range;
   if (seen.has(want)) { data = seen.get(want); render(); }
   try {
     const t0 = performance.now();
     const d = await getGroup(g, r);
     if (g !== cur || r !== range) return;          // the reader has moved on
+    if (d.gen && META.gen && d.gen !== META.gen) { await refreshMeta(); return; }
     data = d;
     const t1 = performance.now(); render(); const t2 = performance.now();
     // read by test/perf.mjs: where the time goes on every load
     window.askeePerf = {group: META.groups[g].id, range: r, fetchMs: t1 - t0, renderMs: t2 - t1, tiles: data.tiles.length};
     const idle = window.requestIdleCallback || (f => setTimeout(f, 300));
     idle(() => [1, -1].forEach(dx => { const n = g + dx;
-      if (n >= 0 && n < META.groups.length && !seen.has(n + "|" + r)) getGroup(n, r).catch(() => {}); }));
+      if (n < 0 || n >= META.groups.length) return;
+      const nr = rangeFor(n); if (!seen.has(n + "|" + nr)) getGroup(n, nr).catch(() => {}); }));
   } catch (e) { $("stamp").textContent = "fetch failed: " + e.message; }
   clearTimeout(timer); timer = setTimeout(load, CADENCE[range] || 300000);
 }
@@ -652,25 +763,35 @@ addEventListener("keydown", e => {
   if (e.key === "ArrowUp" && !geometry().phone) { e.preventDefault(); turn(-1); }
   if (e.key === "t") { const i = META.themes.findIndex(t => t.id === TH.id); applyTheme(META.themes[(i + 1) % META.themes.length].id); }
   if (e.key === "a") applyTheme("auto");
-  const k = "1234567".indexOf(e.key); if (k >= 0 && META.ranges[k]) { range = META.ranges[k]; load(); }
+  if (e.key === "?") toggleHelp();
+  if (e.key === "Escape") toggleHelp(false);
+  const k = "1234567".indexOf(e.key); if (k >= 0 && META.ranges[k]) { pick = META.ranges[k]; load(); }
 });
 let tx = null, ty = null;
-addEventListener("touchstart", e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, {passive:true});
+// a sideways drag inside a wide table scrolls the table; it must not also change the group
+addEventListener("touchstart", e => { if (e.target.closest && e.target.closest("pre")) { tx = null; return; }
+  tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, {passive:true});
 addEventListener("touchend", e => {
   if (tx === null) return;
   const dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
   if (Math.abs(dx) > 70 && Math.abs(dx) > 2*Math.abs(dy)) go(cur + (dx < 0 ? 1 : -1));
   tx = null;
 }, {passive:true});
-let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(render, 150); });
+// A phone fires resize whenever its address bar slides in or out; only a change of width
+// (a rotation, a desktop window dragged) can change a phone's layout.
+let rz, lastW = innerWidth;
+addEventListener("resize", () => {
+  if (geometry().phone && innerWidth === lastW) return;
+  lastW = innerWidth; clearTimeout(rz); rz = setTimeout(render, 150);
+});
 
 (async () => {
   META = await (await fetch("api/meta")).json();
   $("brand").textContent = META.title; document.title = META.title;
-  range = META.default_range;
+  pick = META.default_range;
   const [h, rg] = location.hash.slice(1).split("/");
   const i = META.groups.findIndex(g => g.id === h); if (i >= 0) cur = i;
-  if (META.ranges.includes(rg)) range = rg;
+  if (META.ranges.includes(rg)) pick = rg;
   const q = new URLSearchParams(location.search).get("theme");
   applyTheme(q || localStorage.getItem("askee-theme") || META.default_theme);
   load();

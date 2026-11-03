@@ -1,8 +1,8 @@
 package main
 
 // The page catalogue is DATA, not code: a JSON file lists groups and pages, so the same binary
-// serves any Prometheus-compatible TSDB (VictoriaMetrics, Prometheus). examples/node-exporter.json
-// is a generic starting point.
+// serves any Prometheus-compatible TSDB (VictoriaMetrics, Prometheus). The standard charts come
+// as packs inside the binary (packs.go); examples/node-exporter.json is a starting point.
 //
 // Every expression comes from the file. Neither the web API nor the CLI accepts query text from
 // a caller — only a group id and one of the fixed ranges — so the dashboard cannot be used to
@@ -36,9 +36,21 @@ type Config struct {
 	// collect[] filters). On the live range, live pages are computed from it directly —
 	// read every second while someone is watching, five minutes kept in memory, nothing
 	// stored. All other ranges read the database as usual.
-	LiveSource string    `json:"live_source"`
-	Groups     []Group   `json:"groups"`
-	Pages      []PageCfg `json:"pages"`
+	LiveSource string `json:"live_source"`
+	// LiveSources adds more /metrics URLs read the same way (e.g. a DNS server's own), so
+	// pages over another exporter's metrics can be live too. Each is read every second.
+	LiveSources []string `json:"live_sources"`
+	// SizeLabels names the columns of the sizes file in plain words, e.g.
+	// {"NAS": "home NAS", "COLD": "cold cloud"}. Unnamed columns show lower-cased.
+	SizeLabels map[string]string `json:"size_labels"`
+	// Packs names the built-in chart packs to include (packs.go). Absent with no pages of
+	// its own, a config gets every pack; pages the database cannot fill are dropped.
+	Packs          []string  `json:"packs"`
+	Hide           []string  `json:"hide"`            // page ids to leave out, e.g. a pack page
+	NodeFilter     string    `json:"node_filter"`     // label matcher for $node, e.g. instance="web1:9100"
+	ScrapeInterval string    `json:"scrape_interval"` // the database's; sets the rate() window (default 60s)
+	Groups         []Group   `json:"groups"`
+	Pages          []PageCfg `json:"pages"`
 }
 
 type Group struct {
@@ -88,13 +100,16 @@ type PageCfg struct {
 	ID       string      `json:"id"`
 	Group    string      `json:"group"`
 	Title    string      `json:"title"`
-	Subtitle string      `json:"subtitle"` // the "so what" — one line under the title
+	Info     string      `json:"info"`     // the "so what": one sentence, behind the ⓘ beside the title
+	Subtitle string      `json:"subtitle"` // the old name for info, still read
 	Kind     string      `json:"kind"`     // line | hour | instant | runs | snapshot | sizes
 	Unit     string      `json:"unit"`
-	Range    string      `json:"range"`    // fixed range for this page ("" = the selected one)
-	Live     bool        `json:"live"`     // fast-moving: follows the "live" range (others show 1h)
-	Log      bool        `json:"log"`      // log scale: for values spanning orders of magnitude (latency)
-	Capacity string      `json:"capacity"` // capacity kind: expr for the TOTAL; expr is the USED part
+	Range    string      `json:"range"`     // fixed range for this page ("" = the selected one)
+	MinRange string      `json:"min_range"` // follows the selected range, but never shorter (daily data)
+	Requires string      `json:"requires"`  // a query that must return something, or the page is left out
+	Live     bool        `json:"live"`      // fast-moving: follows the "live" range (others show 1h)
+	Log      bool        `json:"log"`       // log scale: for values spanning orders of magnitude (latency)
+	Capacity string      `json:"capacity"`  // capacity kind: expr for the TOTAL; expr is the USED part
 	YMin     *float64    `json:"ymin"`
 	YMax     *float64    `json:"ymax"`
 	Series   []SeriesCfg `json:"series"`
@@ -134,7 +149,7 @@ type model struct {
 	stack   bool
 	split   bool
 	log     bool
-	rng     string // the range actually drawn (a non-live page in the live view shows 1h)
+	rng     string // what the page shows: a range (see drawn), "now" or "snapshot"
 	events  []event
 	blocks  []block
 	note    string
@@ -185,6 +200,21 @@ func loadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	return finishConfig(&c)
+}
+
+// finishConfig expands packs, fills defaults and checks every page.
+func finishConfig(c *Config) (*Config, error) {
+	if err := c.expandPacks(); err != nil {
+		return nil, err
+	}
+	if c.ScrapeInterval != "" {
+		d, err := time.ParseDuration(c.ScrapeInterval)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("scrape_interval %q: want a duration such as 15s", c.ScrapeInterval)
+		}
+		scrapeEvery = d
+	}
 	if c.Thermal == [2]float64{} {
 		c.Thermal = [2]float64{30, 100}
 	}
@@ -197,7 +227,25 @@ func loadConfig(path string) (*Config, error) {
 	if c.PriceLabel == "" {
 		c.PriceLabel = "$/mo"
 	}
-	for i, p := range c.Pages {
+	seen := map[string]bool{}
+	for i := range c.Pages {
+		p := &c.Pages[i]
+		if p.Subtitle != "" {
+			if p.Info != "" {
+				return nil, fmt.Errorf("page %s: has both info and subtitle (the old name); keep info", p.ID)
+			}
+			p.Info, p.Subtitle = p.Subtitle, ""
+		}
+		if err := checkCopy(p); err != nil {
+			return nil, err
+		}
+		if err := checkTime(page{PageCfg: *p, cfg: c}); err != nil {
+			return nil, err
+		}
+		if seen[p.ID] {
+			return nil, fmt.Errorf("page id %q is used twice", p.ID)
+		}
+		seen[p.ID] = true
 		if p.ID == "" || p.Group == "" || p.Kind == "" {
 			return nil, fmt.Errorf("page %d (%q): id, group and kind are required", i, p.Title)
 		}
@@ -206,8 +254,61 @@ func loadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("page %s: unknown range %q", p.ID, p.Range)
 			}
 		}
+		if p.MinRange != "" {
+			if _, ok := rangeByName(p.MinRange); !ok {
+				return nil, fmt.Errorf("page %s: unknown min_range %q", p.ID, p.MinRange)
+			}
+		}
 	}
-	return &c, nil
+	return c, nil
+}
+
+// The chart carries the data and words wait behind the ⓘ. A page's title is a few plain words
+// with no commas or dashes, its info is one sentence with no semicolon or dash to splice a
+// second onto it, and its
+// note — printed under the chart, always visible — is a short label such as "last 30 days",
+// never an explanation. A config that breaks either does not load (a live reload keeps the
+// previous catalogue), so the rule holds whoever edits the file.
+const maxNote = 50
+
+var sentenceBreak = regexp.MustCompile(`[.!?]\s+\p{Lu}`)
+
+func checkCopy(p *PageCfg) error {
+	if strings.ContainsAny(p.Title, ",;:—–") {
+		return fmt.Errorf("page %s: title is what, in a few plain words, with no commas or dashes (the range goes in the tag): %q", p.ID, p.Title)
+	}
+	if strings.ContainsAny(p.Info, ";—") {
+		return fmt.Errorf("page %s: info has a semicolon or dash, which splices two sentences into one, so cut it to one: %q", p.ID, p.Info)
+	}
+	if sentenceBreak.MatchString(p.Info) {
+		return fmt.Errorf("page %s: info must be one sentence (it sits behind the ⓘ): %q", p.ID, p.Info)
+	}
+	if n := len([]rune(p.Note)); n > maxNote || sentenceBreak.MatchString(p.Note) {
+		return fmt.Errorf("page %s: note is %d characters; it shows under the chart, so keep it a label of %d or fewer and put explanations in info: %q", p.ID, n, maxNote, p.Note)
+	}
+	return nil
+}
+
+// checkTime keeps the picker honest: a windowed page never pins its own range, and a page
+// marked live must be one the live evaluator can compute, or the tab's live mark would lie.
+func checkTime(p page) error {
+	if p.windowed() && p.Range != "" {
+		return fmt.Errorf("page %s: covers a stretch of time, so it follows the range picker; drop \"range\" and set \"min_range\" to the shortest range it can show", p.ID)
+	}
+	if !p.windowed() && p.MinRange != "" {
+		return fmt.Errorf("page %s: does not follow the range picker (a reading or a fixed pattern), so min_range means nothing here", p.ID)
+	}
+	if p.Live {
+		if p.Kind != "line" {
+			return fmt.Errorf("page %s: only line pages can be live", p.ID)
+		}
+		for _, s := range p.Series {
+			if _, err := parseLive(bare(s.Expr)); err != nil {
+				return fmt.Errorf("page %s: marked live, but %v in %q", p.ID, err, s.Expr)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Config) pages() []page {
@@ -232,16 +333,145 @@ func (c *Config) groupTitle(id string) string {
 	return id
 }
 
-// fetch builds the model for one page. r is the selected range; a page with its own Range
-// ignores it (e.g. pool free space only means something over 30 days).
-func (p page) fetch(r rng) model {
-	if p.Range != "" && p.Range != "now" && p.Range != "snapshot" {
-		r, _ = rangeByName(p.Range)
+// drawn is the range a page shows when r is selected: its own fixed Range if it has one;
+// the last hour in the live view unless it is a live page; never shorter than its MinRange.
+func (p page) drawn(r rng) rng {
+	if f, ok := rangeByName(p.Range); ok {
+		return f
 	}
 	if r.name == "live" && !p.Live {
 		r, _ = rangeByName("1h")
 	}
-	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, split: p.Split, log: p.Log, note: p.Note, rng: r.name}
+	if mr, ok := rangeByName(p.MinRange); ok && r.span < mr.span {
+		r = mr
+	}
+	return r
+}
+
+// tag names the time a page's header claims when r is selected: the range for a windowed
+// page, "now" for a reading of the present, "snapshot" for the snapshot file.
+func (p page) tag(r rng) string {
+	switch {
+	case p.windowed():
+		return p.drawn(r).name
+	case p.Kind == "hour":
+		return p.profileRange().name
+	case p.Kind == "instant":
+		return "now"
+	}
+	return "snapshot"
+}
+
+// ── tabs and their time ranges ──────────────────────────────────────────────────────
+// A chart that covers a stretch of time (a windowed page) follows the range picker. One that
+// shows a reading (a figure now, a snapshot) does not, and says so in its header. Each group
+// has a floor: the longest of its windowed pages' shortest ranges. The picker offers nothing
+// below it, so every windowed chart in a tab shows exactly the range the picker names. A
+// group goes live only when every windowed page in it can; one that mixes live and delayed
+// pages is "mixed", and none of its pages goes live.
+
+// windowed reports whether a page covers a stretch of time chosen by the picker. An hour
+// profile does not: it is a pattern over a fixed window (30 days unless its range says
+// otherwise), so it neither follows the picker nor raises the tab's floor, and its header
+// names its own window ("30d", plus "not live" on the live range).
+func (p page) windowed() bool {
+	switch p.Kind {
+	case "line", "runs":
+		return true
+	case "instant":
+		return strings.Contains(p.Expr, "$__range")
+	}
+	return false
+}
+
+// floor is the shortest range a windowed page can show: live for a live line page (when a
+// live source is set), else 1h, raised to its min_range.
+func (p page) floor() rng {
+	r, _ := rangeByName("1h")
+	if p.Live && p.Kind == "line" && p.cfg != nil && len(p.cfg.liveURLs()) > 0 {
+		r, _ = rangeByName("live")
+	}
+	if mr, ok := rangeByName(p.MinRange); ok && mr.span > r.span {
+		r = mr
+	}
+	return r
+}
+
+type groupMode struct {
+	Min   string `json:"min"`   // the shortest range every windowed chart can show; "" = readings only
+	Live  bool   `json:"live"`  // every windowed chart can go live
+	Mixed bool   `json:"mixed"` // some can and some cannot, so none does here
+}
+
+func modeOf(ps []page) groupMode {
+	var g groupMode
+	var lo rng
+	n, anyLive := 0, false
+	for _, p := range ps {
+		if !p.windowed() {
+			continue
+		}
+		f := p.floor()
+		anyLive = anyLive || f.name == "live"
+		if n == 0 || f.span > lo.span {
+			lo = f
+		}
+		n++
+	}
+	if n == 0 {
+		return g
+	}
+	g.Min, g.Live = lo.name, lo.name == "live"
+	g.Mixed = anyLive && !g.Live
+	return g
+}
+
+func (c *Config) mode(group string) groupMode {
+	var ps []page
+	for _, p := range c.pages() {
+		if p.Group == group {
+			ps = append(ps, p)
+		}
+	}
+	return modeOf(ps)
+}
+
+// clamp raises a selected range to the group's floor.
+func (g groupMode) clamp(r rng) rng {
+	if mr, ok := rangeByName(g.Min); ok && r.span < mr.span {
+		return mr
+	}
+	return r
+}
+
+// profileRange is the fixed window an hour profile averages over.
+func (p page) profileRange() rng {
+	if r, ok := rangeByName(p.Range); ok {
+		return r
+	}
+	r, _ := rangeByName("30d")
+	return r
+}
+
+// liveURLs is every /metrics page the live store reads.
+func (c *Config) liveURLs() []string {
+	var out []string
+	if c.LiveSource != "" {
+		out = append(out, c.LiveSource)
+	}
+	return append(out, c.LiveSources...)
+}
+
+// withRange puts the drawn window where $__range stands, e.g. increase(x[$__range]).
+func withRange(expr string, r rng) string {
+	return strings.ReplaceAll(expr, "$__range", fmt.Sprintf("%ds", int(r.span.Seconds())))
+}
+
+// fetch builds the model for one page. r is the selected range; drawn says what the page
+// shows instead (e.g. pool free space only means something over 90 days).
+func (p page) fetch(sel rng) model {
+	r := p.drawn(sel)
+	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, split: p.Split, log: p.Log, note: p.Note, rng: p.tag(sel)}
 	end := time.Now()
 	start := end.Add(-r.span)
 	switch p.Kind {
@@ -250,8 +480,8 @@ func (p page) fetch(r rng) model {
 		for _, s := range p.Series {
 			qs = append(qs, q{s.Expr, s.Name, s.Label})
 		}
-		if r.name == "live" && p.Live && p.cfg.LiveSource != "" {
-			if ss, last, err := p.cfg.live().series(qs); err == nil {
+		if r.name == "live" && p.Live && len(p.cfg.liveURLs()) > 0 {
+			if ss, last, err := p.cfg.live().series(qs); err == nil && !math.IsInf(firstT(ss), 1) {
 				m.series, m.start, m.end, m.step = ss, last.Add(-r.span), last, r.step
 				m.refs = p.resolveRefs()
 				// until five minutes have been read, the older part of the window comes from
@@ -263,7 +493,7 @@ func (p page) fetch(r rng) model {
 				}
 				break
 			}
-			// a query the live evaluator cannot do falls through to the database
+			// nothing read yet, or a metric the live source does not export: the database
 		}
 		m.series, m.err = rangeSeries(qs, start, end, r.step)
 		m.start, m.end, m.step = start, end, r.step
@@ -271,7 +501,7 @@ func (p page) fetch(r rng) model {
 		m.events = p.cfg.eventsIn(start, end)
 	case "hour":
 		m.kind = "bars"
-		s, err := rangeSeries([]q{{expr: p.Expr, name: "v"}}, end.Add(-30*24*time.Hour), end, time.Hour)
+		s, err := rangeSeries([]q{{expr: p.Expr, name: "v"}}, end.Add(-p.profileRange().span), end, time.Hour)
 		m.err = err
 		if len(s) > 0 {
 			var sum [24]float64
@@ -289,7 +519,7 @@ func (p page) fetch(r rng) model {
 		}
 	case "instant":
 		m.kind = "bars"
-		res, err := instant(p.Expr)
+		res, err := instant(withRange(p.Expr, r))
 		m.err = err
 		sort.Slice(res, func(i, j int) bool { return res[i].value > res[j].value })
 		for _, x := range res {
@@ -363,8 +593,12 @@ func (p page) fetch(r rng) model {
 				continue
 			}
 			m.unit = x[4]
+			text := fmt.Sprintf("%s of %s %s", trimNum(used), trimNum(total), x[4])
+			if m, ok := byteUnit[strings.ToUpper(x[4])]; ok { // each number in its own readable unit
+				text = fmtBytes(used*m) + " of " + fmtBytes(total*m)
+			}
 			m.blocks = append(m.blocks, block{Label: x[1], Segs: []seg{{"used", used}}, Total: total,
-				Text: fmt.Sprintf("%s of %s %s · %.0f%%", trimNum(used), trimNum(total), x[4], 100*used/total)})
+				Text: fmt.Sprintf("%s · %.0f%%", text, 100*used/total)})
 		}
 		if len(m.blocks) == 0 {
 			m.err = fmt.Errorf("no \"name (used of total unit)\" lines in %q", p.Key)
@@ -682,7 +916,10 @@ func sizesBlocks(c *Config) ([]block, string, string, error) {
 		return math.Max(rows[i].v[1], rows[i].v[2]) > math.Max(rows[j].v[1], rows[j].v[2])
 	})
 	const top = 5
-	names := map[string]string{"LOCAL": "on this box", "NAS": "NAS", "COLD": "cold cloud", "REMOTE": "remote", "BILLED": "billed"}
+	names := map[string]string{"LOCAL": "on this box", "REMOTE": "remote", "BILLED": "billed"}
+	for k, v := range c.SizeLabels { // a store's plain name, e.g. "NAS": "home NAS"
+		names[strings.ToUpper(k)] = v
+	}
 	var out []block
 	for col := 0; col < 3; col++ {
 		var bl block
@@ -716,11 +953,33 @@ func sizesBlocks(c *Config) ([]block, string, string, error) {
 	return out, "GB", note, nil
 }
 
-func fmtGB(gb float64) string {
-	if gb >= 1000 {
-		return fmt.Sprintf("%.2f TB", gb/1000)
+func fmtGB(gb float64) string { return fmtBytes(gb * 1e9) }
+
+// byteUnit maps a decimal size unit to bytes.
+var byteUnit = map[string]float64{"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12, "PB": 1e15}
+
+// fmtBytes writes a size the way a person would say it: the largest unit that keeps the number
+// at 1 or more, three significant figures — "857 GB", "1.99 TB", "38.2 GB", never "0.04 TB".
+// Used where each number stands alone (a capacity row, a total). A chart of many values keeps
+// one unit for all of them instead (charting-rules.md, rule 5).
+func fmtBytes(b float64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	i := 0
+	for math.Abs(b) >= 1000 && i < len(units)-1 {
+		b /= 1000
+		i++
 	}
-	return fmt.Sprintf("%.1f GB", gb)
+	return sig3(b) + " " + units[i]
+}
+
+func sig3(v float64) string {
+	switch a := math.Abs(v); {
+	case a >= 100:
+		return fmt.Sprintf("%.0f", v)
+	case a >= 10:
+		return fmt.Sprintf("%.1f", v)
+	}
+	return fmt.Sprintf("%.2f", v)
 }
 
 // blockLines draws block rows as text, the report kit's way: █ for used or a segment, ░ for
