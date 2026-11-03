@@ -104,12 +104,13 @@ type PageCfg struct {
 	Subtitle string      `json:"subtitle"` // the old name for info, still read
 	Kind     string      `json:"kind"`     // line | hour | instant | runs | snapshot | sizes
 	Unit     string      `json:"unit"`
-	Range    string      `json:"range"`     // fixed range for this page ("" = the selected one)
-	MinRange string      `json:"min_range"` // follows the selected range, but never shorter (daily data)
-	Requires string      `json:"requires"`  // a query that must return something, or the page is left out
-	Live     bool        `json:"live"`      // fast-moving: follows the "live" range (others show 1h)
-	Log      bool        `json:"log"`       // log scale: for values spanning orders of magnitude (latency)
-	Capacity string      `json:"capacity"`  // capacity kind: expr for the TOTAL; expr is the USED part
+	Range    string      `json:"range"`       // fixed range for this page ("" = the selected one)
+	MinRange string      `json:"min_range"`   // follows the selected range, but never shorter (daily data)
+	Requires string      `json:"requires"`    // a query that must return something, or the page is left out
+	Live     bool        `json:"live"`        // fast-moving: follows the "live" range (others show 1h)
+	LiveWin  string      `json:"live_window"` // live rate() looks back this far ("30s"); default liveRate
+	Log      bool        `json:"log"`         // log scale: for values spanning orders of magnitude (latency)
+	Capacity string      `json:"capacity"`    // capacity kind: expr for the TOTAL; expr is the USED part
 	YMin     *float64    `json:"ymin"`
 	YMax     *float64    `json:"ymax"`
 	Series   []SeriesCfg `json:"series"`
@@ -298,9 +299,17 @@ func checkTime(p page) error {
 	if !p.windowed() && p.MinRange != "" {
 		return fmt.Errorf("page %s: does not follow the range picker (a reading or a fixed pattern), so min_range means nothing here", p.ID)
 	}
+	if p.LiveWin != "" && !p.Live {
+		return fmt.Errorf("page %s: live_window means nothing on a page that is not live", p.ID)
+	}
 	if p.Live {
 		if p.Kind != "line" {
 			return fmt.Errorf("page %s: only line pages can be live", p.ID)
+		}
+		if p.LiveWin != "" {
+			if w, err := time.ParseDuration(p.LiveWin); err != nil || w < liveEvery || w > liveKeep/2 {
+				return fmt.Errorf("page %s: live_window %q: want a duration from 1s to 2m, such as \"30s\"", p.ID, p.LiveWin)
+			}
 		}
 		for _, s := range p.Series {
 			if _, err := parseLive(bare(s.Expr)); err != nil {
@@ -331,6 +340,14 @@ func (c *Config) groupTitle(id string) string {
 		}
 	}
 	return id
+}
+
+// liveWindow is how far back rate() looks on the live range.
+func (p page) liveWindow() time.Duration {
+	if w, err := time.ParseDuration(p.LiveWin); err == nil {
+		return w
+	}
+	return liveRate
 }
 
 // drawn is the range a page shows when r is selected: its own fixed Range if it has one;
@@ -481,7 +498,7 @@ func (p page) fetch(sel rng) model {
 			qs = append(qs, q{s.Expr, s.Name, s.Label})
 		}
 		if r.name == "live" && p.Live && len(p.cfg.liveURLs()) > 0 {
-			if ss, last, err := p.cfg.live().series(qs); err == nil && !math.IsInf(firstT(ss), 1) {
+			if ss, last, err := p.cfg.live().series(qs, p.liveWindow()); err == nil && !math.IsInf(firstT(ss), 1) {
 				m.series, m.start, m.end, m.step = ss, last.Add(-r.span), last, r.step
 				m.refs = p.resolveRefs()
 				// until five minutes have been read, the older part of the window comes from

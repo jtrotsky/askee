@@ -6,7 +6,7 @@ package main
 // computed here, from a small subset of PromQL that covers what a live chart needs:
 //
 //	metric{label="v", label=~"re", label!="v", label!~"re"}
-//	rate(...)                    per second, from consecutive reads; counter resets skipped
+//	rate(...)                    per second, over the last few seconds (liveRate); counter resets skipped
 //	sum(...) avg(...) max(...) min(...)
 //	+ - * /  between numbers and series, and parentheses
 //
@@ -30,6 +30,10 @@ const (
 	liveKeep  = 5*time.Minute + 10*time.Second // the live range is 5 min; a little slack
 	liveEvery = time.Second
 	liveIdle  = time.Minute // stop reading this long after the last live request
+	// liveRate is the window rate() looks back over. One second is too short: ZFS writes in
+	// bursts every 5 s and FreeBSD counts disk busy time in whole seconds, so a rate of two
+	// consecutive reads flicks between nothing and a spike. A page can ask for longer.
+	liveRate = 5 * time.Second
 )
 
 type snapshot struct {
@@ -308,7 +312,7 @@ func splitKey(key string) (string, map[string]string) {
 
 // series evaluates each query over the snapshots in memory. It errors (and the caller falls
 // back to the database) when an expression is outside the subset or nothing has been read yet.
-func (ls *liveStore) series(qs []q) ([]series, time.Time, error) {
+func (ls *liveStore) series(qs []q, win time.Duration) ([]series, time.Time, error) {
 	ls.touch()
 	ls.mu.Lock()
 	snaps := append([]snapshot(nil), ls.snaps...)
@@ -322,7 +326,7 @@ func (ls *liveStore) series(qs []q) ([]series, time.Time, error) {
 	}
 	var out []series
 	for _, qq := range qs {
-		n, err := parseLive(bare(qq.expr)) // $__rate is a database window; live, rate() reads consecutive samples
+		n, err := parseLiveWindow(bare(qq.expr), win) // $__rate is a database window; live, rate() looks back win
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -416,18 +420,36 @@ func (sel selector) match(key string) bool {
 	return true
 }
 
-type rateOf struct{ sel selector }
+type rateOf struct {
+	sel selector
+	win time.Duration // look back this far; never less than the previous read
+}
 
+// eval is the rate from the oldest read inside the window to this one. Only the two ends are
+// read, so a wider window costs nothing; a counter that went down (a reset) falls back to the
+// last step alone, and a reset inside that step is skipped.
 func (r rateOf) eval(s []snapshot, i int) vec {
-	out := vec{}
-	cur, prev := r.sel.eval(s, i), r.sel.eval(s, i-1)
-	dt := s[i].t.Sub(s[i-1].t).Seconds()
-	if dt <= 0 {
-		return out
+	j := i - 1
+	for j > 0 && s[i].t.Sub(s[j-1].t) <= r.win {
+		j--
 	}
+	out := vec{}
+	cur, old := r.sel.eval(s, i), r.sel.eval(s, j)
+	var prev vec
 	for k, v := range cur {
-		if p, ok := prev[k]; ok && v >= p { // a drop is a counter reset: skip that step
-			out[k] = (v - p) / dt
+		if p, ok := old[k]; ok && v >= p {
+			if dt := s[i].t.Sub(s[j].t).Seconds(); dt > 0 {
+				out[k] = (v - p) / dt
+			}
+			continue
+		}
+		if prev == nil {
+			prev = r.sel.eval(s, i-1)
+		}
+		if p, ok := prev[k]; ok && v >= p {
+			if dt := s[i].t.Sub(s[i-1].t).Seconds(); dt > 0 {
+				out[k] = (v - p) / dt
+			}
 		}
 	}
 	return out
@@ -590,8 +612,11 @@ func (o orOf) eval(s []snapshot, i int) vec {
 
 // parseLive is a small recursive-descent parser for the subset above, plus `or`, `^` and
 // vector(n), which the packs use for fallbacks between exporter versions and for units.
-func parseLive(expr string) (node, error) {
-	p := &lparser{s: expr}
+func parseLive(expr string) (node, error) { return parseLiveWindow(expr, liveRate) }
+
+// parseLiveWindow is parseLive with rate() looking back win instead of liveRate.
+func parseLiveWindow(expr string, win time.Duration) (node, error) {
+	p := &lparser{s: expr, win: win}
 	n, err := p.or()
 	if err != nil {
 		return nil, err
@@ -604,8 +629,9 @@ func parseLive(expr string) (node, error) {
 }
 
 type lparser struct {
-	s string
-	i int
+	s   string
+	i   int
+	win time.Duration // rate() window
 }
 
 func (p *lparser) space() {
@@ -836,7 +862,7 @@ func (p *lparser) factor() (node, error) {
 			if !ok {
 				return nil, fmt.Errorf("live: rate takes a metric")
 			}
-			return rateOf{sel}, nil
+			return rateOf{sel, p.win}, nil
 		}
 		if by == nil { // sum(x) by (a, b)
 			if b, ok, err := p.byClause(); err != nil {
