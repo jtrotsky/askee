@@ -199,7 +199,7 @@ and assumes nothing else about the machine.
 | pack | group | charts |
 |---|---|---|
 | `system` | System | CPU busy (kernel, apps, waiting), CPU temperature, load against the core count, CPU by hour |
-| `memory` | Memory | memory use (FreeBSD or Linux accounting, whichever the machine reports), swap against its size, ZFS cache hits and size |
+| `memory` | Memory | memory use (FreeBSD or Linux accounting, whichever the machine reports), swap against its size, ZFS cache misses and size |
 | `storage` | Storage | fullest filesystems, free space on `/`, disk traffic |
 | `network` | Network | traffic on the physical network cards, traffic by interface |
 | `blocky` | DNS | queries, share blocked, answer time, answers by type — for the [blocky](https://github.com/0xERR0R/blocky) DNS proxy |

@@ -249,9 +249,40 @@ function sample(c, x, y, col, dash, band) {  // the line's own style, so a label
   else { c.strokeStyle = col; c.lineWidth = 2; c.setLineDash(dash); c.beginPath(); c.moveTo(x, y); c.lineTo(x + 12, y); c.stroke(); }
   c.restore();
 }
-function bandFill(c, col, i, T, ph) {
-  if (TH.mono) return alpha(col, .10 + .12 * (i % 4));          // solid grey tints, never hatching
-  return alpha(col, .62);
+// Stacked bands in the mono themes carry sediment-style dot textures: grey tints alone sit ~12 %
+// apart and blur together. Texture is set by band ORDER, not size, so a live chart's patterns
+// stay put as the bands resize. The bottom band is a solid tint; each band above takes the next
+// step of a four-step ladder that changes shape, mark size and spacing at once, so neighbours
+// never look alike: coarse and fine alternate, and shape flips between square and round. The
+// textured bands share one faint tint, so the marks carry the contrast. Tiles anchor to the
+// canvas, so marks never crawl between ticks; each is drawn once and cached by colour, step and
+// pixel ratio. Colour themes keep their plain fills: their hues already tell the bands apart.
+const LADDER = [                // mark size and pitch in CSS px; hex rows are offset half a pitch
+  {sq: true,  hex: false, m: 2.6, pitch: 3.6},   // dense square grid
+  {sq: false, hex: true,  m: 3.4, pitch: 8},     // large, open circles
+  {sq: true,  hex: true,  m: 1.6, pitch: 3.8},   // fine offset squares
+  {sq: false, hex: true,  m: 1.4, pitch: 8},     // scattered dots
+];
+const texCache = new Map();
+function texTile(c, ink, tint, step) {
+  const dpr = devicePixelRatio || 1, k = [ink, tint, step, dpr].join("|");
+  if (texCache.has(k)) return texCache.get(k);
+  const {sq, hex, m, pitch} = LADDER[step % LADDER.length];
+  const rowH = hex ? pitch * 0.866 : pitch, tw = pitch, th = hex ? rowH * 2 : rowH;
+  const W = Math.max(1, Math.round(tw * dpr)), H = Math.max(1, Math.round(th * dpr));
+  const cv = new OffscreenCanvas(W, H), x = cv.getContext("2d"), sx = W / tw, sy = H / th;
+  x.scale(sx, sy); x.fillStyle = tint; x.fillRect(0, 0, tw, th); x.fillStyle = ink;
+  const mark = (cx, cy) => { x.beginPath();
+    if (sq) x.rect(cx - m / 2, cy - m / 2, m, m); else x.arc(cx, cy, m / 2, 0, 2 * Math.PI); x.fill(); };
+  mark(pitch / 2, rowH / 2);
+  if (hex) { mark(0, rowH * 1.5); mark(pitch, rowH * 1.5); }
+  const p = c.createPattern(cv, "repeat"); p.setTransform(new DOMMatrix().scale(1 / sx, 1 / sy));
+  texCache.set(k, p); return p;
+}
+function bandFill(c, col, i, T, ph, n) {
+  if (!TH.mono) return alpha(col, .62);
+  if (i === 0 || n < 2) return alpha(col, .38);                // the bottom band: solid
+  return texTile(c, alpha(col, .75), alpha(col, .08), i - 1);  // tint kept under the dots: a 2 px band still reads
 }
 
 // one panel: range frame, refs, events, the data, and its end labels
@@ -275,7 +306,7 @@ function panel(c, t, raw, b, opts) {
   } else {
     if (t.ymin != null) lo = Math.min(lo, t.ymin);
     if (t.ymax != null) { hi = Math.max(hi, t.ymax); if (t.ymax === 100) hi = Math.min(hi, 100); }
-    if (hi <= lo) { hi = lo + 1; lo = lo - 1; }
+    if (hi <= lo) { hi = lo + 1; if (lo !== 0) lo -= 1; }   // a flat zero reads 0–1, never −1–1
     // round the scale out to tick values, so the axis reads in whole steps
     ticks = niceTicks(lo, hi, opts.split ? 2 : ph > 140 ? 4 : 3);
     lo = Math.min(lo, ticks[0]); hi = Math.max(hi, ticks[ticks.length - 1]);
@@ -346,18 +377,23 @@ function panel(c, t, raw, b, opts) {
     // parts of a whole: bands, top first so lower bands sit on top; each named at its middle
     for (let i = S.length - 1; i >= 0; i--) {
       const s = S[i], col = colOf(i);
-      c.fillStyle = bandFill(c, col, i, T, ph); path(s, true); c.fill();
+      // each band is filled down to the axis and drawn over the ones above it; in the mono themes
+      // the panel colour goes under it first, so a band never shows the texture of the band above
+      if (TH.mono) { c.fillStyle = TH.vars[1]; path(s, true); c.fill(); }
+      c.fillStyle = bandFill(c, col, i, T, ph, S.length); path(s, true); c.fill();
       c.strokeStyle = TH.mono ? col : TH.vars[1]; c.lineWidth = 1; path(s, false); c.stroke();
     }
     S.forEach((s, i) => {
       if (!s.v.length) return;
       const below = i ? lastOf(S[i-1]) : lo;
-      labels.push({y: (Y(lastOf(s)) + Y(below)) / 2, text: endText(t, raw[i], S.length), col: colOf(i), band: bandFill(c, colOf(i), i, T, ph)});
+      labels.push({y: (Y(lastOf(s)) + Y(below)) / 2, text: endText(t, raw[i], S.length), col: colOf(i), band: bandFill(c, colOf(i), i, T, ph, S.length)});
     });
   } else {
     S.forEach((s, i) => {
       if (!s.v.length) return;
       const col = colOf(i), dash = opts.split ? [] : dashOf(i);
+      if (s.raw) { c.fillStyle = alpha(col, .35);  // the raw seconds behind a smoothed line
+        for (let k = 0; k < s.raw.v.length; k++) c.fillRect(X(s.raw.t[k]) - 1, Math.max(T, Y(s.raw.v[k])) - 1, 2, 2); }  // off-scale seconds sit on the top edge
       c.lineWidth = 2; c.lineJoin = "round"; c.setLineDash(dash);
       if (t.thermal && !TH.mono) {      // the line itself carries temperature: each segment coloured by value
         const gap = gapOf(s);
@@ -390,9 +426,24 @@ function marginFor(c, t, W) {
   return Math.min(W * 0.40, Math.max(24, ...texts) + 10);
 }
 
+// Live rates read consecutive one-second samples, so bursty sources look like a comb: ZFS
+// flushes writes every 5 s, a quiet DNS server answers 0, 2, 0, 6 queries a second. On the
+// live range a line is drawn as a trailing mean over SMOOTH seconds, with each raw sample a
+// faint dot under it (not under stacked bands). ?smooth=1 turns it off. Log scales are left alone.
+const SMOOTH = +(new URLSearchParams(location.search).get("smooth") ?? 5);
+function trailing(s, w) {
+  const v = new Array(s.v.length); let j = 0;
+  for (let k = 0; k < s.v.length; k++) {   // summed afresh each time: a running sum drifts below 0
+    while (s.t[j] <= s.t[k] - w) j++;
+    let sum = 0; for (let m = j; m <= k; m++) sum += s.v[m];
+    v[k] = sum / (k - j + 1);
+  }
+  return {...s, v};
+}
 function drawLine(cv, t) {
   const [c, W, H] = setup(cv);
-  const S = t.series || [];
+  const smooth = t.drawn === "live" && SMOOTH > 1 && !t.log;
+  const S = smooth ? (t.series || []).map(s => ({...trailing(s, SMOOTH), raw: s})) : (t.series || []);
   const ev = (t.events || []).some(e => e.t >= t.start && e.t <= t.end);
   const L = 58, T = ev ? 22 : 8, B = 20, R = marginFor(c, t, W), pw = W - L - R, ph = H - T - B;
   if (!S.some(s => s.v.length)) { c.fillStyle = TH.vars[5]; c.fillText("no data in this range", L + 8, T + ph/2); return null; }
