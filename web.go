@@ -299,7 +299,7 @@ func handler(cur *atomic.Pointer[served]) http.Handler {
 	return mux
 }
 
-// watchConfig reloads the catalogue when its file changes, so editing the catalogue needs no
+// watchConfig reloads the catalogue when its file changes, so editing the config file needs no
 // restart. Every 30 s it compares the file's modification time and size; on a change it waits
 // for the writer to finish (two equal readings a second apart), then loads the file through
 // the same checks as at start. A file that fails to load is reported and the running
