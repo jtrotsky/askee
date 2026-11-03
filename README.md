@@ -53,7 +53,10 @@ The rest follows the same idea, after Tufte's *The Visual Display of Quantitativ
   window is filled from the database until those five minutes are read. Live pages are computed
   from a small PromQL subset (`rate`, `sum`/`avg`/`max`/`min` with or without `by`, label matchers,
   arithmetic, `^`, `or`, `vector(n)`, `histogram_quantile`). `live_sources` adds more `/metrics`
-  URLs (a DNS server's own, say), all read at once each second. A page marked live whose query falls outside it does not load, so a live
+  URLs (a DNS server's own, say), all read at once each second. Live `rate()` looks back five
+  seconds, not one: ZFS writes in bursts every five seconds and FreeBSD counts disk busy time
+  in whole seconds, so a one-second rate flicks between nothing and a spike. A page sets
+  `live_window` (up to `2m`) for a counter that moves more slowly still. A page marked live whose query falls outside it does not load, so a live
   mark never covers a chart quietly drawn from the database. Other ranges stand still and
   repaint in place on a cadence that suits them (1 min for 1h, 5 min beyond).
 - **Every chart shows the range you picked.** A chart that covers a stretch of time follows the
@@ -294,7 +297,7 @@ if a fetch takes over 150 ms, a draw over 100 ms, or a live tick over one 16 ms 
 
 | kind | draws | keys |
 |---|---|---|
-| `line` | time series | `series[]` (`expr` + `name`, or `label` to name each result), `refs[]` (`value` or `expr`, + `label`), `ymin`/`ymax`, `stack` for parts of a whole, `split` for one panel per series on its own scale, `thermal` to colour a line by temperature, `live` to follow the live range, `log` for a log scale |
+| `line` | time series | `series[]` (`expr` + `name`, or `label` to name each result), `refs[]` (`value` or `expr`, + `label`), `ymin`/`ymax` (the axis reaches at least these, so a quiet chart lies flat instead of blowing noise up to full height; `ymax: 100` is also a hard top, for percentages), `stack` for parts of a whole, `split` for one panel per series on its own scale, `thermal` to colour a line by temperature, `live` to follow the live range, `live_window` for how far a live `rate()` looks back (default `5s`), `log` for a log scale |
 | `hour` | mean by hour of day over a fixed window (`range`, default 30d), as bars; a pattern, so it does not follow the picker | `expr` |
 | `capacity` | how full each thing is, as block rows | `key`: a snapshot section of `name (USED of TOTAL UNIT)` lines; `refs` in % |
 | `instant` | one bar per result of an instant query: a reading now, or, with `$__range` in the query (`increase(x[$__range])`), a total over the selected range | `expr`, `label`, `min_value`, `limit` |

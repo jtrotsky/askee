@@ -246,6 +246,43 @@ func TestLiveEvaluator(t *testing.T) {
 	}
 }
 
+// Live rate() looks back a few seconds, so a counter that moves in bursts (ZFS writes every
+// 5 s, busy time in whole seconds) reads as its average, not as nothing and then a spike. A
+// counter reset inside the window falls back to the last step.
+func TestLiveRateWindow(t *testing.T) {
+	t0 := time.Now()
+	key := seriesKey("c", nil)
+	var snaps []snapshot
+	for s, v := range []float64{0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 10, 2, 3} { // +5 every 5 s, then a reset
+		snaps = append(snaps, snapshot{t: t0.Add(time.Duration(s) * time.Second), v: map[string]float64{key: v}})
+	}
+	at := func(win time.Duration, i int) (float64, bool) {
+		n, err := parseLiveWindow("rate(c)", win)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, ok := n.eval(snaps, i)[key]
+		return v, ok
+	}
+	for _, c := range []struct {
+		win  time.Duration
+		i    int
+		want float64
+	}{
+		{time.Second, 4, 0}, {time.Second, 5, 5}, // two reads: nothing, then the whole burst
+		{5 * time.Second, 9, 1}, {5 * time.Second, 10, 1}, // five seconds: the average
+		{5 * time.Second, 3, 0},  // the window is cut short at the first read
+		{5 * time.Second, 12, 1}, // reset in the window: the last step alone (2 → 3)
+	} {
+		if got, ok := at(c.win, c.i); !ok || math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("window %v at %d s = %v (%v), want %v", c.win, c.i, got, ok, c.want)
+		}
+	}
+	if _, ok := at(5*time.Second, 11); ok { // the reset step itself has no rate
+		t.Errorf("a reset step should have no rate")
+	}
+}
+
 // When the database stops answering, a chart keeps its last good data and says how old it
 // is — it never turns into a transport error.
 func TestDatabaseOutageKeepsLastGood(t *testing.T) {
@@ -399,13 +436,16 @@ func TestCheckTime(t *testing.T) {
 		{ID: "b", Kind: "snapshot", MinRange: "7d"},
 		{ID: "c", Kind: "hour", Live: true},
 		{ID: "d", Kind: "line", Live: true, Series: []SeriesCfg{{Expr: `label_replace(x, "a", "b", "c", "d")`}}},
+		{ID: "f", Kind: "line", LiveWin: "30s"},             // not live
+		{ID: "g", Kind: "line", Live: true, LiveWin: "10m"}, // past the five minutes kept
+		{ID: "h", Kind: "line", Live: true, LiveWin: "30"},  // no unit
 	}
 	for _, p := range bad {
 		if checkTime(page{PageCfg: p}) == nil {
 			t.Errorf("%s: passed, want an error", p.ID)
 		}
 	}
-	ok := PageCfg{ID: "e", Kind: "line", Live: true, Series: []SeriesCfg{{Expr: "(sum(a) or vector(0)) / 2^30"}}}
+	ok := PageCfg{ID: "e", Kind: "line", Live: true, LiveWin: "30s", Series: []SeriesCfg{{Expr: "(sum(a) or vector(0)) / 2^30"}}}
 	if err := checkTime(page{PageCfg: ok}); err != nil {
 		t.Errorf("e: %v", err)
 	}
