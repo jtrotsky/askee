@@ -6,7 +6,9 @@
 //	askee -config my.json -serve 127.0.0.1:8095 web dashboard
 //	askee -config my.json -print memory -range 7d
 //	askee -config my.json -dump 3 -size 120x30  one page, once, no TTY
+//	askee -vm http://127.0.0.1:8428 -serve :8095 no config: every built-in pack
 //	askee -themes                                  list themes and their validation status
+//	askee -packs                                   list the built-in chart packs
 package main
 
 import (
@@ -15,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -26,6 +29,8 @@ func main() {
 	size := flag.String("size", "100x14", "width x height for -print and -dump")
 	startPage := flag.Int("page", 1, "page to open on")
 	listThemes := flag.Bool("themes", false, "list themes and exit")
+	listPacks := flag.Bool("packs", false, "list the built-in chart packs and exit")
+	vmFlag := flag.String("vm", "", "database URL; overrides the config's, and with no config runs every built-in pack (also $ASKEE_VM)")
 	flag.Parse()
 
 	if *listThemes {
@@ -34,20 +39,51 @@ func main() {
 		}
 		return
 	}
+	if *listPacks {
+		for _, n := range packNames() {
+			p, _ := loadPack(n)
+			var gs []string
+			for _, g := range p.Groups {
+				gs = append(gs, g.Title)
+			}
+			fmt.Printf("%-8s %2d pages  %s\n", n, len(p.Pages), strings.Join(gs, ", "))
+		}
+		return
+	}
+	vm := *vmFlag
+	if vm == "" {
+		vm = os.Getenv("ASKEE_VM")
+	}
 	path := *cfgPath
 	if path == "" {
 		path = findConfig()
 	}
-	if path == "" {
-		fmt.Fprintln(os.Stderr, "askee: no config. Pass -config FILE, set ASKEE_CONFIG, or put one at ~/.config/askee/askee.json")
+	var cfg *Config
+	var err error
+	switch {
+	case path != "":
+		cfg, err = loadConfig(path)
+	case vm != "":
+		host, _ := os.Hostname()
+		cfg, err = finishConfig(&Config{Title: host})
+	default:
+		fmt.Fprintln(os.Stderr, "askee: no config. Pass -vm URL to chart a database with the built-in packs, or -config FILE (also $ASKEE_CONFIG, ~/.config/askee/askee.json)")
 		os.Exit(1)
 	}
-	cfg, err := loadConfig(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "askee:", err)
 		os.Exit(1)
 	}
+	if vm != "" {
+		cfg.VM = vm
+	}
+	if cfg.VM == "" {
+		cfg.VM = "http://127.0.0.1:8428"
+	}
 	vmBase = cfg.VM
+	// a server may start alongside its database: give it two minutes before deciding which
+	// pages it can fill; a one-off command asks once
+	cfg.prune(map[bool]time.Duration{true: 2 * time.Minute}[*serveA != ""])
 	var w, h int
 	fmt.Sscanf(*size, "%dx%d", &w, &h)
 
@@ -64,7 +100,7 @@ func main() {
 		}
 		os.Exit(printGroup(cfg, *printG, r, w, h))
 	case *serveA != "":
-		if err := serve(cfg, *serveA); err != nil {
+		if err := serve(cfg, path, vm, *serveA); err != nil {
 			fmt.Fprintln(os.Stderr, "askee:", err)
 			os.Exit(1)
 		}

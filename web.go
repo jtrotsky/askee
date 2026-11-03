@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,6 +74,11 @@ func printGroup(cfg *Config, g string, r rng, w, h int) int {
 		fmt.Fprintf(os.Stderr, "askee: no group %q (have: %s)\n", g, strings.Join(ids, " "))
 		return 2
 	}
+	gm := modeOf(ps)
+	if c := gm.clamp(r); c.name != r.name {
+		fmt.Fprintf(os.Stderr, "askee: %s starts at %s; showing %s, not %s\n", g, c.name, c.name, r.name)
+		r = c
+	}
 	ms := fetchAll(ps, r)
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
@@ -115,8 +121,8 @@ func printGroup(cfg *Config, g string, r rng, w, h int) int {
 			}
 			fmt.Fprintf(out, "  reference: %s = %s %s\n", rf.Label, fmtVal(rf.V), u)
 		}
-		if p.Subtitle != "" {
-			fmt.Fprintf(out, "  so what: %s\n", p.Subtitle)
+		if p.Info != "" {
+			fmt.Fprintf(out, "  so what: %s\n", p.Info)
 		}
 		fmt.Fprintln(out)
 	}
@@ -125,31 +131,30 @@ func printGroup(cfg *Config, g string, r rng, w, h int) int {
 
 // ── -serve ─────────────────────────────────────────────────────────────────────────
 type tileJSON struct {
-	ID       string       `json:"id"`
-	Title    string       `json:"title"`
-	Subtitle string       `json:"subtitle,omitempty"`
-	Kind     string       `json:"kind"`
-	Unit     string       `json:"unit"`
-	Fixed    string       `json:"fixed,omitempty"`
-	Note     string       `json:"note,omitempty"`
-	Err      string       `json:"err,omitempty"`
-	YMin     *float64     `json:"ymin,omitempty"`
-	YMax     *float64     `json:"ymax,omitempty"`
-	Start    int64        `json:"start,omitempty"`
-	End      int64        `json:"end,omitempty"`
-	Step     float64      `json:"step,omitempty"`
-	Thermal  bool         `json:"thermal,omitempty"`
-	Stack    bool         `json:"stack,omitempty"`
-	Refs     []ref        `json:"refs,omitempty"`
-	Series   []seriesJSON `json:"series,omitempty"`
-	Bars     []bar        `json:"bars,omitempty"`
-	Lines    []string     `json:"lines,omitempty"`
-	Span     [2]int       `json:"span"`
-	Split    bool         `json:"split,omitempty"`
-	Log      bool         `json:"log,omitempty"`
-	Drawn    string       `json:"drawn,omitempty"` // range actually drawn: "live" slides with the clock
-	Blocks   []block      `json:"blocks,omitempty"`
-	Events   []event      `json:"events,omitempty"`
+	ID      string       `json:"id"`
+	Title   string       `json:"title"`
+	Info    string       `json:"info,omitempty"`
+	Kind    string       `json:"kind"`
+	Unit    string       `json:"unit"`
+	Note    string       `json:"note,omitempty"`
+	Err     string       `json:"err,omitempty"`
+	YMin    *float64     `json:"ymin,omitempty"`
+	YMax    *float64     `json:"ymax,omitempty"`
+	Start   int64        `json:"start,omitempty"`
+	End     int64        `json:"end,omitempty"`
+	Step    float64      `json:"step,omitempty"`
+	Thermal bool         `json:"thermal,omitempty"`
+	Stack   bool         `json:"stack,omitempty"`
+	Refs    []ref        `json:"refs,omitempty"`
+	Series  []seriesJSON `json:"series,omitempty"`
+	Bars    []bar        `json:"bars,omitempty"`
+	Lines   []string     `json:"lines,omitempty"`
+	Span    [2]int       `json:"span"`
+	Split   bool         `json:"split,omitempty"`
+	Log     bool         `json:"log,omitempty"`
+	Drawn   string       `json:"drawn,omitempty"` // what is shown: a range ("live" slides with the clock), "now" or "snapshot"
+	Blocks  []block      `json:"blocks,omitempty"`
+	Events  []event      `json:"events,omitempty"`
 }
 type seriesJSON struct {
 	Name string    `json:"name"`
@@ -158,7 +163,7 @@ type seriesJSON struct {
 }
 
 func toTile(p page, m model) tileJSON {
-	t := tileJSON{ID: p.ID, Title: p.Title, Subtitle: p.Subtitle, Kind: m.kind, Unit: m.unit, Fixed: p.Range, Note: m.note,
+	t := tileJSON{ID: p.ID, Title: p.Title, Info: p.Info, Kind: m.kind, Unit: m.unit, Note: m.note,
 		YMin: m.yMin, YMax: m.yMax, Thermal: m.thermal, Stack: m.stack, Refs: m.refs, Bars: m.bars, Lines: m.lines, Step: m.step.Seconds(), Span: p.Span, Split: m.split, Events: m.events, Log: m.log, Blocks: m.blocks, Drawn: m.rng}
 	if m.err != nil {
 		t.Err = m.err.Error()
@@ -167,6 +172,11 @@ func toTile(p page, m model) tileJSON {
 		t.Start, t.End = m.start.Unix(), m.end.Unix()
 	}
 	for _, s := range m.series {
+		// an empty series keeps its slot (colour follows the entity) and goes out as [], never
+		// null: a pack series that only one OS has is empty on the other
+		if s.t == nil {
+			s.t, s.v = []float64{}, []float64{}
+		}
 		t.Series = append(t.Series, seriesJSON{s.name, s.t, s.v})
 	}
 	return t
@@ -187,9 +197,34 @@ type themeJSON struct {
 	Seq     []string `json:"seq"`
 }
 
-func serve(cfg *Config, addr string) error {
+// served is everything one loaded catalogue gives the web face. It is swapped whole when the
+// config file changes (watchConfig), so a request sees one consistent catalogue.
+type served struct {
+	cfg *Config
+	all []page
+	gc  *groupCache
+	gen int64 // bumps on every reload; the page refetches its meta when it changes
+}
+
+func newServed(cfg *Config, gen int64) *served {
 	all := cfg.pages()
-	gc := newGroupCache(cfg, all)
+	return &served{cfg: cfg, all: all, gc: newGroupCache(cfg, all, gen), gen: gen}
+}
+
+// serve runs the web face. path is the config file to watch for changes ("" = none, e.g. a
+// -vm run with no file); vmOverride is the -vm flag, which a reloaded file must not undo.
+func serve(cfg *Config, path, vmOverride, addr string) error {
+	var cur atomic.Pointer[served]
+	cur.Store(newServed(cfg, 1))
+	if path != "" {
+		go watchConfig(path, vmOverride, &cur)
+	}
+	srv := &http.Server{Addr: addr, Handler: handler(&cur), ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 60 * time.Second}
+	fmt.Fprintf(os.Stderr, "askee: serving on http://%s/\n", addr)
+	return srv.ListenAndServe()
+}
+
+func handler(cur *atomic.Pointer[served]) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -212,11 +247,14 @@ func serve(cfg *Config, addr string) error {
 			ID    string `json:"id"`
 			Title string `json:"title"`
 			N     int    `json:"n"`
+			groupMode
 		}
+		s := cur.Load()
+		cfg := s.cfg
 		var gs []g
 		for _, x := range cfg.Groups {
-			if n := len(groupPages(all, x.ID)); n > 0 {
-				gs = append(gs, g{x.ID, x.Title, n})
+			if ps := groupPages(s.all, x.ID); len(ps) > 0 {
+				gs = append(gs, g{x.ID, x.Title, len(ps), modeOf(ps)})
 			}
 		}
 		var rs []string
@@ -230,11 +268,12 @@ func serve(cfg *Config, addr string) error {
 				Palette: t.Palette, Seq: t.seqRamp()})
 		}
 		writeJSON(w, map[string]any{"title": cfg.Title, "groups": gs, "ranges": rs, "default_range": cfg.DefaultRange,
-			"themes": ts, "default_theme": cfg.DefaultTheme, "dashes": dashPatterns, "thermal_range": cfg.Thermal})
+			"themes": ts, "default_theme": cfg.DefaultTheme, "dashes": dashPatterns, "thermal_range": cfg.Thermal, "gen": s.gen})
 	})
 	mux.HandleFunc("GET /api/group/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s := cur.Load()
 		id := r.PathValue("id")
-		ps := groupPages(all, id)
+		ps := groupPages(s.all, id)
 		rq := r.URL.Query().Get("range")
 		rg, ok := rangeByName(rq)
 		if len(ps) == 0 || (!ok && rq != "") {
@@ -242,9 +281,10 @@ func serve(cfg *Config, addr string) error {
 			return
 		}
 		if !ok {
-			rg, _ = rangeByName(cfg.DefaultRange)
+			rg, _ = rangeByName(s.cfg.DefaultRange)
 		}
-		e := gc.get(id, rg)
+		rg = modeOf(ps).clamp(rg) // never below what every chart in the group can show
+		e := s.gc.get(id, rg)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
@@ -256,9 +296,63 @@ func serve(cfg *Config, addr string) error {
 		w.Write(e.body)
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 60 * time.Second}
-	fmt.Fprintf(os.Stderr, "askee: serving on http://%s/\n", addr)
-	return srv.ListenAndServe()
+	return mux
+}
+
+// watchConfig reloads the catalogue when its file changes, so editing droog.json needs no
+// restart. Every 30 s it compares the file's modification time and size; on a change it waits
+// for the writer to finish (two equal readings a second apart), then loads the file through
+// the same checks as at start. A file that fails to load is reported and the running
+// catalogue stays: a half-saved or mistyped edit never takes the dashboard down.
+// Not reloaded: the database URL (vm) and the live sources' URLs — those still need a restart.
+func watchConfig(path, vmOverride string, cur *atomic.Pointer[served]) {
+	sig := func() string {
+		st, err := os.Stat(path)
+		if err != nil {
+			return ""
+		}
+		return fmt.Sprint(st.ModTime().UnixNano(), st.Size())
+	}
+	last := sig()
+	for {
+		time.Sleep(30 * time.Second)
+		now := sig()
+		if now == "" || now == last {
+			continue
+		}
+		time.Sleep(time.Second)
+		if again := sig(); again != now {
+			continue // still being written; look again next round
+		}
+		last = now
+		if err := reloadConfig(path, vmOverride, cur); err != nil {
+			fmt.Fprintf(os.Stderr, "askee: %s changed but did not load, still serving the previous catalogue: %v\n", path, err)
+		}
+	}
+}
+
+func reloadConfig(path, vmOverride string, cur *atomic.Pointer[served]) error {
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return err
+	}
+	old := cur.Load()
+	if vmOverride != "" {
+		cfg.VM = vmOverride
+	}
+	if cfg.VM == "" {
+		cfg.VM = old.cfg.VM
+	}
+	if cfg.VM != old.cfg.VM {
+		fmt.Fprintf(os.Stderr, "askee: vm changed to %s — restart askee to use it; still querying %s\n", cfg.VM, old.cfg.VM)
+		cfg.VM = old.cfg.VM
+	}
+	cfg.prune(30 * time.Second)
+	reloadLive(cfg)
+	cur.Store(newServed(cfg, old.gen+1))
+	old.gc.close()
+	fmt.Fprintf(os.Stderr, "askee: reloaded %s — %d groups, %d pages\n", path, len(cfg.Groups), len(cfg.Pages))
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -278,6 +372,8 @@ type cacheEntry struct {
 }
 
 type groupCache struct {
+	gen     int64
+	stop    chan struct{} // closed when a reload replaces this cache: its warmer exits
 	cfg     *Config
 	all     []page
 	mu      sync.Mutex
@@ -324,10 +420,17 @@ func ttl(r rng) time.Duration {
 	}
 }
 
-func newGroupCache(cfg *Config, all []page) *groupCache {
-	gc := &groupCache{cfg: cfg, all: all, entries: map[string]*cacheEntry{}, busy: map[string]chan struct{}{}, tiles: map[string]tileCache{}}
+func (gc *groupCache) close() { close(gc.stop) }
+
+func newGroupCache(cfg *Config, all []page, gen int64) *groupCache {
+	gc := &groupCache{gen: gen, stop: make(chan struct{}), cfg: cfg, all: all, entries: map[string]*cacheEntry{}, busy: map[string]chan struct{}{}, tiles: map[string]tileCache{}}
 	go func() {
 		for {
+			select {
+			case <-gc.stop:
+				return
+			default:
+			}
 			def, _ := rangeByName(cfg.DefaultRange)
 			live, _ := rangeByName("live")
 			for _, g := range cfg.Groups {
@@ -343,7 +446,11 @@ func newGroupCache(cfg *Config, all []page) *groupCache {
 					}
 				}
 			}
-			time.Sleep(20 * time.Second)
+			select {
+			case <-gc.stop:
+				return
+			case <-time.After(20 * time.Second):
+			}
 		}
 	}()
 	return gc
@@ -411,7 +518,7 @@ func (gc *groupCache) refresh(id string, r rng) *cacheEntry {
 	}
 	wg.Wait()
 	body, _ := json.Marshal(map[string]any{"group": id, "title": gc.cfg.groupTitle(id), "range": r.name,
-		"generated": time.Now().Unix(), "tiles": tiles})
+		"generated": time.Now().Unix(), "gen": gc.gen, "tiles": tiles})
 	var buf bytes.Buffer
 	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
 	zw.Write(body)

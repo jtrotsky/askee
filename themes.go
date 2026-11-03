@@ -50,13 +50,13 @@ var dashPatterns = [][]float64{{}, {7, 4}, {1.5, 3.5}, {9, 3, 2, 3}, {14, 5}, {3
 
 var themes = []Theme{
 	// ── print first: one ink, line styles carry identity (auto picks newsprint / carbon) ───────────────────────────────────────
-	{ID: "newsprint", Name: "Newsprint", Status: "mono", Style: "flat", Mono: true, Light: true, Note: "greyscale on newsprint; dashes, dots and dash-dots tell the lines apart",
+	{ID: "newsprint", Name: "Light", Status: "mono", Style: "flat", Mono: true, Light: true, Note: "greyscale on newsprint; dashes, dots and dash-dots tell the lines apart",
 		Surface: "#e9e7e1", Panel: "#f1efea", Border: "#b9b5ab", Grid: "#dcd8cf", Text: "#1d1c1a", Dim: "#6b6860", Title: "#1d1c1a", Accent: "#1d1c1a",
 		Palette: []string{"#1d1c1a", "#3c3a36", "#5a5751", "#76736b", "#2a2926", "#4a4843"}},
 	{ID: "sepia", Name: "Sepia", Status: "mono", Style: "flat", Mono: true, Light: true, Note: "brown ink on old paper, like a letterpress plate",
 		Surface: "#ede2c8", Panel: "#f4ead2", Border: "#c2ad85", Grid: "#e2d3b0", Text: "#3b2a18", Dim: "#7a6347", Title: "#3b2a18", Accent: "#6b4423",
 		Palette: []string{"#3b2a18", "#5c4128", "#7a5a3a", "#94775a", "#4b3520", "#6b4f33"}},
-	{ID: "carbon", Name: "Carbon", Status: "mono", Style: "flat", Mono: true, Note: "greyscale on charcoal — the print style, dark",
+	{ID: "carbon", Name: "Dark", Status: "mono", Style: "flat", Mono: true, Note: "greyscale on charcoal — the print style, dark",
 		Surface: "#141414", Panel: "#1a1a1a", Border: "#3a3a3a", Grid: "#262626", Text: "#e6e6e6", Dim: "#9a9a9a", Title: "#f2f2f2", Accent: "#f2f2f2",
 		Palette: []string{"#ededed", "#c4c4c4", "#a0a0a0", "#848484", "#d8d8d8", "#b0b0b0"}},
 	{ID: "phosphor", Name: "Phosphor", Status: "mono", Style: "flat", Mono: true, Note: "green CRT: one phosphor, line styles",

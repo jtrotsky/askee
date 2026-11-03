@@ -77,7 +77,7 @@ func rangeSeries(qs []q, start, end time.Time, step time.Duration) ([]series, er
 	var out []series
 	for _, qq := range qs {
 		p := url.Values{}
-		p.Set("query", qq.expr)
+		p.Set("query", withWindow(qq.expr, step))
 		p.Set("start", strconv.FormatInt(start.Unix(), 10))
 		p.Set("end", strconv.FormatInt(end.Unix(), 10))
 		p.Set("step", strconv.Itoa(int(step.Seconds())))
@@ -118,7 +118,7 @@ type ires struct {
 
 func instant(expr string) ([]ires, error) {
 	p := url.Values{}
-	p.Set("query", expr)
+	p.Set("query", withWindow(expr, 0))
 	res, err := vmQuery("query", p)
 	if err != nil {
 		return nil, err
