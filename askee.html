@@ -239,7 +239,8 @@ function niceTicks(lo, hi, n) {
   const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
   const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(st => st >= raw);
   const out = [];
-  for (let v = Math.floor(lo / step) * step; v <= hi + step * 0.999; v += step) out.push(+v.toPrecision(12));
+  // the 1e-9 forgives float dust: 100 − 100 × 1 can come out as −1e-14, which must not add a −5 tick
+  for (let v = Math.floor(lo / step + 1e-9) * step; v <= hi + step * 0.999; v += step) out.push(+v.toPrecision(12));
   return out;
 }
 function endText(t, s, n) { return (n === 1 ? "" : s.name + " ") + fmt(lastOf(s)) + (t.unit || ""); }
@@ -443,7 +444,11 @@ function trailing(s, w) {
 function drawLine(cv, t) {
   const [c, W, H] = setup(cv);
   const smooth = t.drawn === "live" && SMOOTH > 1 && !t.log;
-  const S = smooth ? (t.series || []).map(s => ({...trailing(s, SMOOTH), raw: s})) : (t.series || []);
+  // a live series carries a few seconds either side of the range: the mean uses them, the
+  // chart does not, or they would draw into the axis labels and stretch the scale
+  const within = s => { if (t.start == null || t.end == null) return s; const keep = s.t.map(ts => ts >= t.start && ts <= t.end);
+    return {...s, t: s.t.filter((_, k) => keep[k]), v: s.v.filter((_, k) => keep[k])}; };
+  const S = (t.series || []).map(s => smooth ? {...within(trailing(s, SMOOTH)), raw: within(s)} : within(s));
   const ev = (t.events || []).some(e => e.t >= t.start && e.t <= t.end);
   const L = 58, T = ev ? 22 : 8, B = 20, R = marginFor(c, t, W), pw = W - L - R, ph = H - T - B;
   if (!S.some(s => s.v.length)) { c.fillStyle = TH.vars[5]; c.fillText("no data in this range", L + 8, T + ph/2); return null; }
