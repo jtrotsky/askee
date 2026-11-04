@@ -147,7 +147,8 @@ func fmtVal(v float64) string {
 	case a >= 1e4:
 		return sig3(v/1e3) + "K"
 	case a >= 1000:
-		return fmt.Sprintf("%d,%03d", int(v)/1000, int(math.Abs(v))%1000) // thousands separator (Wei)
+		r := int(math.Round(v))                            // round, not truncate: 4,294.97 is 4,295
+		return fmt.Sprintf("%d,%03d", r/1000, abs(r)%1000) // thousands separator (Wei)
 	case a >= 100:
 		return fmt.Sprintf("%.0f", v)
 	case a >= 10:
