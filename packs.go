@@ -180,6 +180,9 @@ func rateWindow(step time.Duration) time.Duration {
 // withWindow puts the rate() window where $__rate stands, for a query at this step (0 for an
 // instant query).
 func withWindow(expr string, step time.Duration) string {
+	// $__step is the width of one point, for rollups that summarise each point's stretch
+	// (min_over_time(x[$__step]) under a line of its averages)
+	expr = strings.ReplaceAll(expr, "$__step", fmt.Sprintf("%ds", int(step.Seconds())))
 	if !strings.Contains(expr, "$__rate") {
 		return expr
 	}

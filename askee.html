@@ -181,7 +181,8 @@ function spanOf(t, g) {
     const chrome = 48;   // title and footer
     const need = t.kind === "bars" ? chrome + (t.bars || []).length * BAR_ROW
                : t.kind === "blocks" ? chrome + 18 + (t.blocks || []).length * ((t.blocks || []).some(b => !b.total) ? 40 : 28)
-               : t.kind === "text" ? chrome + (t.lines || []).length * TEXT_ROW : 0;
+               : t.kind === "text" ? chrome + (t.lines || []).length * TEXT_ROW
+               : t.kind === "clock" ? chrome + 40 + (t.rows || []).length * 14 : 0;
     r = need ? Math.ceil((need + GAP) / (g.cellH + GAP)) : 1;
   }
   return [c, Math.min(Math.max(r, 1), g.phone ? 4 : g.rows)];
@@ -292,6 +293,10 @@ function panel(c, t, raw, b, opts) {
   let dlo = Infinity, dhi = -Infinity;
   for (const s of S) for (const v of s.v) { if (v < dlo) dlo = v; if (v > dhi) dhi = v; }
   if (!isFinite(dlo)) return null;
+  // a range behind a line (its series' lo and hi): part of the data, so part of the scale
+  const bandFor = i => t.stack ? null : (t.bands || []).find(b => b.of === (opts.split ? opts.colour : i));
+  S.forEach((s, i) => { const b = bandFor(i); if (b) b.t.forEach((ts, k) => {
+    if (ts < t.start || ts > t.end) return; dlo = Math.min(dlo, b.lo[k]); dhi = Math.max(dhi, b.hi[k]); }); });
   let lo = dlo, hi = dhi;
   if (!opts.split) for (const r of t.refs || []) { lo = Math.min(lo, r.value); hi = Math.max(hi, r.value); }
   const {L, T, pw, ph} = b;
@@ -390,11 +395,23 @@ function panel(c, t, raw, b, opts) {
       labels.push({y: (Y(lastOf(s)) + Y(below)) / 2, text: endText(t, raw[i], S.length), col: colOf(i), band: bandFill(c, colOf(i), i, T, ph, S.length)});
     });
   } else {
+    // ranges first, so every line sits on top: a pale fill from lo to hi, broken where data is
+    S.forEach((s, i) => {
+      const b = bandFor(i); if (!b || !b.t.length) return;
+      const gap = gapOf({t: b.t}), runs = [[0]];
+      for (let k = 1; k < b.t.length; k++) { if (b.t[k] - b.t[k-1] > gap) runs.push([]); runs[runs.length - 1].push(k); }
+      c.fillStyle = alpha(colOf(i), TH.mono ? .14 : .2);
+      for (const r of runs) {
+        c.beginPath();
+        r.forEach((k, j) => j ? c.lineTo(X(b.t[k]), Y(b.hi[k])) : c.moveTo(X(b.t[k]), Y(b.hi[k])));
+        for (let j = r.length - 1; j >= 0; j--) c.lineTo(X(b.t[r[j]]), Y(b.lo[r[j]]));
+        c.closePath(); c.fill();
+        if (r.length === 1) c.fillRect(X(b.t[r[0]]) - 1, Y(b.hi[r[0]]), 2, Y(b.lo[r[0]]) - Y(b.hi[r[0]]));
+      }
+    });
     S.forEach((s, i) => {
       if (!s.v.length) return;
       const col = colOf(i), dash = opts.split ? [] : dashOf(i);
-      if (s.raw) { c.fillStyle = alpha(col, .35);  // the raw seconds behind a smoothed line
-        for (let k = 0; k < s.raw.v.length; k++) c.fillRect(X(s.raw.t[k]) - 1, Math.max(T, Y(s.raw.v[k])) - 1, 2, 2); }  // off-scale seconds sit on the top edge
       c.lineWidth = 2; c.lineJoin = "round"; c.setLineDash(dash);
       if (t.thermal && !TH.mono) {      // the line itself carries temperature: each segment coloured by value
         const gap = gapOf(s);
@@ -427,31 +444,16 @@ function marginFor(c, t, W) {
   return Math.min(W * 0.40, Math.max(24, ...texts) + 10);
 }
 
-// Live rates read consecutive one-second samples, so bursty sources look like a comb: ZFS
-// flushes writes every 5 s, a quiet DNS server answers 0, 2, 0, 6 queries a second. On the
-// live range a line is drawn as a trailing mean over SMOOTH seconds, with each raw sample a
-// faint dot under it (not under stacked bands). ?smooth=1 turns it off. Log scales are left alone.
-const SMOOTH = +(new URLSearchParams(location.search).get("smooth") ?? 5);
-function trailing(s, w) {
-  const v = new Array(s.v.length); let j = 0;
-  for (let k = 0; k < s.v.length; k++) {   // summed afresh each time: a running sum drifts below 0
-    while (s.t[j] <= s.t[k] - w) j++;
-    let sum = 0; for (let m = j; m <= k; m++) sum += s.v[m];
-    v[k] = sum / (k - j + 1);
-  }
-  return {...s, v};
-}
 function drawLine(cv, t) {
   const [c, W, H] = setup(cv);
-  const smooth = t.drawn === "live" && SMOOTH > 1 && !t.log;
-  // a live series carries a few seconds either side of the range: the mean uses them, the
-  // chart does not, or they would draw into the axis labels and stretch the scale
+  // a live series carries a few seconds either side of the range: the chart drops them, or
+  // they would draw into the axis labels and stretch the scale
   const within = s => { if (t.start == null || t.end == null) return s; const keep = s.t.map(ts => ts >= t.start && ts <= t.end);
     return {...s, t: s.t.filter((_, k) => keep[k]), v: s.v.filter((_, k) => keep[k])}; };
-  const S = (t.series || []).map(s => smooth ? {...within(trailing(s, SMOOTH)), raw: within(s)} : within(s));
+  const S = (t.series || []).map(within);
   const ev = (t.events || []).some(e => e.t >= t.start && e.t <= t.end);
   const L = 58, T = ev ? 22 : 8, B = 20, R = marginFor(c, t, W), pw = W - L - R, ph = H - T - B;
-  if (!S.some(s => s.v.length)) { c.fillStyle = TH.vars[5]; c.fillText("no data in this range", L + 8, T + ph/2); return null; }
+  if (!S.some(s => s.v.length)) { c.fillStyle = TH.vars[5]; c.fillText(t.empty || "no data in this range", L + 8, T + ph/2); return null; }
   const xLabels = () => {
     c.fillStyle = TH.vars[5];
     const xt = pw > 520 ? 4 : pw > 280 ? 3 : 2;
@@ -473,6 +475,140 @@ function drawLine(cv, t) {
   return {...g, L, pw, T, ph, S};
 }
 
+// drawDays: one slot per calendar day (days.go). An amount is a column from zero, stacked when it
+// is made of parts; a level is a dot, joined to the day before only when that day has one, so a
+// missed night is a break, never a slope. The reader's usual range (mean ± sd of the days
+// before) is a pale block behind each day. Every day carries its number when the slot is wide
+// enough to print it, and the latest is named in the right margin, as on a line.
+function drawDays(cv, t) {
+  const [c, W, H] = setup(cv);
+  const S = t.series || [], bar = t.mark !== "dot", u = t.unit || "", stack = bar && t.stack;
+  const days = [];
+  for (const d = new Date(t.start * 1000); d.getTime() / 1000 < t.end; d.setDate(d.getDate() + 1)) days.push(d.getTime() / 1000);
+  const slotOf = ts => { for (let i = days.length - 1; i >= 0; i--) if (ts >= days[i] - 3600) return i; return -1; };
+  const fill = (ts, vs) => { const a = new Array(days.length).fill(null); ts.forEach((x, k) => { const i = slotOf(x); if (i >= 0) a[i] = vs[k]; }); return a; };
+  const vals = S.map(s => fill(s.t, s.v));
+  const b0 = (t.bands || []).find(b => b.of === 0), band = b0 ? {lo: fill(b0.t, b0.lo), hi: fill(b0.t, b0.hi)} : null;
+  // a stack's total, or null on a day with no part at all (never a printed 0 for a missing day)
+  const top = i => !stack || vals.every(v => v[i] == null) ? null : vals.reduce((a, v) => a + (v[i] ?? 0), 0);
+  let dlo = Infinity, dhi = -Infinity;
+  const see = v => { if (v != null) { dlo = Math.min(dlo, v); dhi = Math.max(dhi, v); } };
+  vals.forEach(v => v.forEach(see));
+  if (!isFinite(dlo)) { c.fillStyle = TH.vars[5]; c.fillText(t.empty || "no data in this range", 66, H / 2); return null; }
+  if (stack) days.forEach((_, i) => see(top(i)));
+  let lo = bar ? Math.min(0, dlo) : dlo, hi = dhi;
+  if (band) band.lo.forEach((v, i) => { if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, band.hi[i]); } });
+  for (const r of t.refs || []) { lo = Math.min(lo, r.value); hi = Math.max(hi, r.value); }
+  if (t.ymin != null) lo = Math.min(lo, t.ymin);
+  if (t.ymax != null) hi = Math.max(hi, t.ymax);
+  if (hi <= lo) { hi = lo + 1; if (lo !== 0) lo -= 1; }
+  // margin: each series' latest value, each reference, the usual range
+  const lastIdx = v => { for (let i = v.length - 1; i >= 0; i--) if (v[i] != null) return i; return -1; };
+  const labels = [];
+  const L = 58, T = 10, B = 20;
+  const texts = S.map((s, j) => { const k = lastIdx(vals[j]); return k < 0 ? "" : (S.length > 1 ? s.name + " " : "") + fmt(vals[j][k]) + u; });
+  const bandText = band ? (() => { const k = lastIdx(band.lo); return k < 0 ? "" : `usual ${fmt(band.lo[k])}–${fmt(band.hi[k])}${u}`; })() : "";
+  const R = Math.min(W * 0.4, Math.max(24, ...texts.map(x => 16 + c.measureText(x).width),
+    ...(t.refs || []).map(r => c.measureText(`${r.label} ${fmt(r.value)}${u}`).width), bandText ? 16 + c.measureText(bandText).width : 0) + 10);
+  const pw = W - L - R, ph = H - T - B, sw = pw / days.length;
+  const ticks = niceTicks(lo, hi, ph > 140 ? 4 : 3);
+  lo = Math.min(lo, ticks[0]); hi = Math.max(hi, ticks[ticks.length - 1]);
+  const Y = v => T + (1 - (v - lo) / (hi - lo)) * ph, X = i => L + (i + 0.5) * sw;
+  // range-frame axis, as on a line
+  const ax = L - 5, st = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : 1;
+  const tf = v => Math.abs(v) >= 1e4 ? fmt(v) : v.toLocaleString("en-NZ", {maximumFractionDigits: Math.max(0, -Math.floor(Math.log10(st) + 1e-9)) + (st / Math.pow(10, Math.floor(Math.log10(st))) === 2.5 ? 1 : 0)});
+  const flo = bar ? Math.min(0, dlo) : dlo, fhi = stack ? Math.max(dhi, ...days.map((_, i) => top(i) ?? -Infinity)) : dhi;
+  c.strokeStyle = TH.vars[5]; c.lineWidth = 1; c.setLineDash([]);
+  c.beginPath(); c.moveTo(ax + .5, Math.round(Y(fhi))); c.lineTo(ax + .5, Math.round(Y(flo)) + 1); c.stroke();
+  c.textAlign = "right"; c.fillStyle = TH.vars[5];
+  let lastY = Infinity;
+  ticks.forEach((v, i) => {
+    const y = Y(v); if (lastY - y < 12) return;
+    c.fillRect(ax - 3, Math.round(y), 3, 1);
+    const tp = i === ticks.length - 1 && u && c.measureText(tf(v) + " " + u).width < L - 10;
+    c.fillText(tp ? tf(v) + " " + u : tf(v), ax - 5, y); lastY = y;
+  });
+  // the usual range: a pale block per day, under everything
+  if (band) {
+    c.fillStyle = alpha(TH.vars[5], TH.mono ? .2 : .22);
+    band.lo.forEach((v, i) => { if (v != null) c.fillRect(L + i * sw + sw * .08, Y(band.hi[i]), sw * .84, Math.max(1, Y(v) - Y(band.hi[i]))); });
+    const k = lastIdx(band.lo);
+    if (k >= 0) labels.push({y: (Y(band.lo[k]) + Y(band.hi[k])) / 2, text: bandText, band: alpha(TH.vars[5], .3), col: TH.vars[5]});
+  }
+  // references: dashed, recessive, named in the margin
+  c.save(); c.setLineDash([4, 4]); c.strokeStyle = TH.vars[5];
+  for (const r of t.refs || []) {
+    const y = Math.round(Y(r.value)) + .5; c.beginPath(); c.moveTo(L, y); c.lineTo(L + pw, y); c.stroke();
+    labels.push({y, text: `${r.label} ${fmt(r.value)}${u}`, ref: true});
+  }
+  c.restore();
+  const colOf = j => PAL[j % PAL.length], small = sw < 30;
+  c.textAlign = "center"; c.font = "10px ui-monospace,Menlo,Consolas,monospace";
+  if (bar) {
+    const n = stack ? 1 : S.length, bw = Math.max(1, Math.min(sw * .62, 44)) / n;
+    days.forEach((_, i) => {
+      let acc = 0;
+      vals.forEach((v, j) => {
+        if (v[i] == null) return;
+        const x = L + i * sw + (sw - bw * n) / 2 + (stack ? 0 : j * bw), y0 = Y(acc + Math.max(0, v[i])), y1 = Y(acc + Math.min(0, v[i]));
+        c.fillStyle = stack ? bandFill(c, colOf(j), j, T, ph, S.length) : (TH.mono ? alpha(colOf(j), .85) : colOf(j));
+        c.fillRect(x, y0, bw - (bw > 3 ? 1 : 0), Math.max(1, y1 - y0));
+        if (stack && TH.mono) { c.strokeStyle = colOf(j); c.lineWidth = 1; c.strokeRect(x + .5, y0 + .5, bw - 2, Math.max(0, y1 - y0 - 1)); }
+        if (stack) acc += v[i];
+      });
+      const tv = stack ? top(i) : (S.length === 1 ? vals[0][i] : null);
+      if (!small && tv != null) { c.fillStyle = TH.vars[4]; c.fillText(fmt(tv), X(i), Y(Math.max(0, tv)) - 7); }
+    });
+  } else {
+    vals.forEach((v, j) => {
+      const col = colOf(j);
+      c.strokeStyle = col; c.lineWidth = 1.5; c.setLineDash(dashOf(j));
+      c.beginPath();
+      for (let i = 1; i < v.length; i++) if (v[i] != null && v[i-1] != null) { c.moveTo(X(i - 1), Y(v[i-1])); c.lineTo(X(i), Y(v[i])); }
+      c.stroke(); c.setLineDash([]);
+      v.forEach((x, i) => {
+        if (x == null) return;
+        c.beginPath(); c.arc(X(i), Y(x), small ? 2.5 : 3.5, 0, 2 * Math.PI);
+        // identity never rests on colour alone: the first series is solid, the rest hollow
+        if (j === 0) { c.fillStyle = col; c.fill(); } else { c.fillStyle = TH.vars[1]; c.fill(); c.lineWidth = 1.5; c.strokeStyle = col; c.stroke(); }
+        if (!small && S.length === 1) { c.fillStyle = TH.vars[4]; c.fillText(fmt(x), X(i), Y(x) - 10); }
+      });
+    });
+  }
+  c.font = "11px ui-monospace,Menlo,Consolas,monospace";
+  // latest values in the margin: bars named at the middle of their part, dots at their height
+  let acc = 0;
+  S.forEach((s, j) => {
+    const k = lastIdx(vals[j]); if (k < 0) return;
+    const v = vals[j][k], y = stack ? (Y(acc) + Y(acc + v)) / 2 : Y(v);
+    if (stack) acc += v;
+    labels.push({y, text: texts[j], col: colOf(j), dash: bar ? [] : dashOf(j), band: bar ? (stack ? bandFill(c, colOf(j), j, T, ph, S.length) : colOf(j)) : null});
+  });
+  const lx = L + pw + 6;
+  for (const it of spread(labels, T + 5, T + ph - 2, 13)) {
+    if (it.ref) { c.fillStyle = TH.vars[5]; c.textAlign = "left"; c.fillText(it.text, lx, it.y); continue; }
+    sample(c, lx, it.y, it.col, it.dash || [], it.band);
+    c.fillStyle = TH.vars[4]; c.textAlign = "left"; c.fillText(it.text, lx + 16, it.y);
+  }
+  // day axis: every day when there is room, else 3–5 of them
+  c.fillStyle = TH.vars[5]; c.textAlign = "center";
+  const name = ts => { const d = new Date(ts * 1000); return days.length <= 14 ? d.toLocaleDateString("en-NZ", {weekday: "short"}) + " " + String(d.getDate()).padStart(2, "0")
+    : d.toLocaleDateString("en-NZ", {day: "2-digit", month: "short"}); };
+  const lw = c.measureText(name(days[0])).width + 8, every = Math.max(1, Math.ceil(lw / sw), Math.ceil(days.length / (sw * days.length > 520 ? 7 : 5)));
+  for (let i = days.length - 1; i >= 0; i -= every) c.fillText(name(days[i]), Math.min(Math.max(X(i), L + lw / 2), L + pw - lw / 2), T + ph + 11);
+  return {L, pw, sw, days, vals, band};
+}
+function hoverDays(el, cv, t, g) {
+  const tip = el.querySelector(".tip");
+  cv.addEventListener("mousemove", e => {
+    const x = e.clientX - cv.getBoundingClientRect().left, i = Math.floor((x - g.L) / g.sw);
+    if (i < 0 || i >= g.days.length) { tip.style.display = "none"; return; }
+    const rows = (t.series || []).map((s, j) => g.vals[j][i] == null ? `${s.name} no reading` : `${s.name} <b>${fmt(g.vals[j][i])}${t.unit || ""}</b>`);
+    if (g.band && g.band.lo[i] != null) rows.push(`usual ${fmt(g.band.lo[i])}–${fmt(g.band.hi[i])}${t.unit || ""}`);
+    tipAt(el, tip, e, cv, `<div class="tnote">${new Date(g.days[i] * 1000).toLocaleDateString("en-NZ", {weekday: "long", day: "numeric", month: "long"})}</div>` + rows.join("<br>"));
+  });
+  cv.addEventListener("mouseleave", () => tip.style.display = "none");
+}
 function drawBars(cv, t) {
   const need = 6 + (t.bars || []).length * BAR_ROW;
   if (need > cv.parentElement.clientHeight) cv.style.height = need + "px";
@@ -499,6 +635,78 @@ function drawBars(cv, t) {
     c.fillStyle = TH.vars[5]; c.textAlign = "right"; c.fillText(`${r.label} ${fmt(r.value)} ${t.unit || ""}`, x - 4, 3 + bars.length * rowH - 6);
   }
   return geo;
+}
+
+// drawClock: one row per day, time of day across (clock.go has the reasoning). A cell's
+// HEIGHT carries its value — the state's place in the list (first tallest) or the amount —
+// so it reads in one-ink themes too; colour repeats it. Missing cells stay blank. Each row
+// ends with its number, and a states chart names its states once, above the first row.
+function drawClock(cv, t) {
+  const rows = t.rows || [], ck = t.clock || {}, states = ck.states || [];
+  const n = Math.round(ck.hours * 60 / ck.cell);
+  const keyH = states.length ? 16 : 0, B = 18, minRow = 7;
+  const need = 6 + keyH + rows.length * minRow + B;
+  if (need > cv.parentElement.clientHeight) cv.style.height = need + "px";
+  const [c, W, H] = setup(cv);
+  if (!rows.length) { c.fillStyle = TH.vars[5]; c.fillText(t.empty || "no data in this range", 10, 14); return null; }
+  const T = 4 + keyH, rowH = Math.min(states.length ? 64 : 40, (H - T - B) / rows.length);
+  const L = Math.max(...rows.map(r => c.measureText(r.label).width)) + 10;
+  const R = Math.max(40, ...rows.map(r => c.measureText(r.text || "").width)) + 10;
+  const pw = W - L - R, cw = pw / n;
+  const every = Math.max(1, Math.ceil(11 / rowH));   // label every row only when there is room
+  let max = 0;
+  if (!states.length) for (const r of rows) for (const v of r.v) if (v != null) max = Math.max(max, v);
+  const idx = v => states.findIndex(s => s.value === v);
+  const level = i => states.length > 1 ? 1 - i * 0.75 / (states.length - 1) : 1;   // first state full height, last a quarter
+  const colour = i => TH.mono ? PAL[Math.min(i, PAL.length - 1)] : PAL[i % PAL.length];
+  if (states.length) {    // the key: each state's block at its own height, named once
+    let x = L;
+    c.textAlign = "left";
+    states.forEach((s, i) => {
+      const h = 10 * level(i);
+      c.fillStyle = colour(i); c.fillRect(x, 4 + 10 - h, 7, h);
+      c.fillStyle = TH.vars[4]; c.fillText(s.name, x + 10, 9); x += 10 + c.measureText(s.name).width + 14;
+    });
+  }
+  rows.forEach((r, ri) => {
+    const y0 = T + ri * rowH, bh = Math.max(2, rowH - (rowH > 8 ? 2 : 1));
+    if (ri % every === 0 || ri === rows.length - 1) {
+      c.fillStyle = TH.vars[4]; c.textAlign = "right"; c.fillText(r.label, L - 6, y0 + rowH / 2);
+      if (r.text) { c.textAlign = "left"; c.fillText(r.text, L + pw + 6, y0 + rowH / 2); }
+    }
+    for (let k = 0; k < r.v.length; k++) {
+      const v = r.v[k]; if (v == null) continue;
+      let f, col;
+      if (states.length) { const i = idx(v); if (i < 0) continue; f = level(i); col = colour(i); }
+      else { f = max ? v / max : 0; if (f <= 0) continue; col = SEQ[Math.min(SEQ.length - 1, Math.floor(f * SEQ.length))]; }
+      const h = Math.max(1, bh * f);
+      c.fillStyle = col; c.fillRect(L + k * cw, y0 + bh - h, Math.max(1, cw - (cw > 3 ? 0.5 : 0)), h);
+    }
+  });
+  // the clock axis: 3–5 round hours
+  const ticks = []; let step = 1;
+  for (const e of [1, 2, 3, 4, 6, 8, 12]) { step = e; if (ck.hours / e <= 5) break; }
+  for (let o = Math.ceil(ck.from / step) * step - ck.from; o <= ck.hours + 1e-9; o += step) ticks.push(o);
+  c.fillStyle = TH.vars[5]; c.textAlign = "center";
+  const yAx = T + rows.length * rowH + 10;
+  for (const o of ticks) {
+    const h = (ck.from + o) % 24, x = L + o / ck.hours * pw;
+    c.fillText(String(Math.floor(h)).padStart(2, "0") + ":00", Math.min(Math.max(x, L + 16), L + pw - 16), yAx);
+  }
+  return {L, pw, T, rowH, n, cw};
+}
+function hoverClock(el, cv, t, g) {
+  const tip = el.querySelector(".tip"), ck = t.clock || {}, states = ck.states || [];
+  cv.addEventListener("mousemove", e => {
+    const b = cv.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top;
+    const ri = Math.floor((y - g.T) / g.rowH), k = Math.floor((x - g.L) / g.cw), r = (t.rows || [])[ri];
+    if (!r || k < 0 || k >= g.n) { tip.style.display = "none"; return; }
+    const v = r.v[k], at = new Date((r.start + k * ck.cell * 60) * 1000);
+    const st = states.find(s => s.value === v);
+    const what = v == null ? "no reading" : st ? st.name : `${fmt(v)} ${t.unit || ""}`;
+    tipAt(el, tip, e, cv, `<div class="tnote">${r.label} ${at.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", hour12: false})}</div><b>${what}</b>` + (r.text ? `<br>day: ${r.text}` : ""));
+  });
+  cv.addEventListener("mouseleave", () => tip.style.display = "none");
 }
 
 // Block style, shared by every horizontal bar: a bar is a run of small cells with a gap
@@ -587,7 +795,7 @@ function anchor(t) {
 // repaint: redraw every shown tile from the new data without touching the layout. Returns
 // false when the layout has to change (a tile appeared, errored or gained data) — the caller
 // then rebuilds.
-const hasData = t => (t.series || []).some(s => s.v.length) || (t.bars || []).length > 0 || (t.blocks || []).length > 0;
+const hasData = t => (t.series || []).some(s => s.v.length) || (t.bars || []).length > 0 || (t.blocks || []).length > 0 || (t.rows || []).length > 0;
 function repaint() {
   for (const e of shown.tiles) {
     const nt = data.tiles.find(x => x.id === e.id);
@@ -601,8 +809,10 @@ function repaint() {
     if (e.t.err) continue;
     anchor(e.t);
     if (e.kind === "line") { const g = drawLine(e.cv, e.t); if (g) Object.assign(e.geo, g); }
+    else if (e.kind === "days") { const g = drawDays(e.cv, e.t); if (g) Object.assign(e.geo, g); }
     else if (e.kind === "bars") { const g = drawBars(e.cv, e.t) || []; e.geo.splice(0, e.geo.length, ...g); }
     else if (e.kind === "blocks") { const g = drawBlocks(e.cv, e.t) || []; e.geo.splice(0, e.geo.length, ...g); }
+    else if (e.kind === "clock") { const g = drawClock(e.cv, e.t); if (g) Object.assign(e.geo, g); }
     else if (e.pre) e.pre.textContent = (e.t.lines || []).join("\n");
     e.foot.textContent = e.t.note || "";
   }
@@ -663,11 +873,23 @@ function render() {
       foot.textContent = t.note || "";
       if (geo) hoverLine(el, cv, t, geo);
       Object.assign(entry, {cv, geo});
+    } else if (t.kind === "days") {
+      const cv = document.createElement("canvas"); body.append(cv);
+      const geo = drawDays(cv, t);
+      foot.textContent = t.note || "";
+      if (geo) hoverDays(el, cv, t, geo);
+      Object.assign(entry, {cv, geo});
     } else if (t.kind === "blocks") {
       const cv = document.createElement("canvas"); body.append(cv);
       const geo = drawBlocks(cv, t);
       foot.textContent = t.note || "";
       if (geo) hoverBlocks(el, cv, t, geo);
+      Object.assign(entry, {cv, geo});
+    } else if (t.kind === "clock") {
+      const cv = document.createElement("canvas"); body.append(cv);
+      const geo = drawClock(cv, t);
+      foot.textContent = t.note || "";
+      if (geo) hoverClock(el, cv, t, geo);
       Object.assign(entry, {cv, geo});
     } else if (t.kind === "bars") {
       const cv = document.createElement("canvas"); body.append(cv);
@@ -810,8 +1032,14 @@ async function load() {
       if (n < 0 || n >= META.groups.length) return;
       const nr = rangeFor(n); if (!seen.has(n + "|" + nr)) getGroup(n, nr).catch(() => {}); }));
   } catch (e) { $("stamp").textContent = "fetch failed: " + e.message; }
-  clearTimeout(timer); timer = setTimeout(load, CADENCE[range] || 300000);
+  clearTimeout(timer); if (!document.hidden) timer = setTimeout(load, CADENCE[range] || 300000);
 }
+// A hidden tab asks nothing: a forgotten live tab rebuilt its group on the server every
+// second, around the clock (2026-11-06). Coming back shows the cached copy at once, then refreshes.
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(timer);
+  if (!document.hidden && META) load();
+});
 addEventListener("keydown", e => {
   if (e.key === "ArrowRight") go(cur + 1);
   if (e.key === "ArrowLeft") go(cur - 1);

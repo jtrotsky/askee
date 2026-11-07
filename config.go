@@ -88,6 +88,8 @@ type SeriesCfg struct {
 	Expr  string `json:"expr"`
 	Name  string `json:"name"`  // fixed series name
 	Label string `json:"label"` // or: name each result by this label
+	Lo    string `json:"lo"`    // line: the bottom of a range drawn behind the line (min_over_time…)
+	Hi    string `json:"hi"`    // line: its top; both may use $__step, the width of one point
 }
 
 type RefCfg struct {
@@ -102,7 +104,7 @@ type PageCfg struct {
 	Title    string      `json:"title"`
 	Info     string      `json:"info"`     // the "so what": one sentence, behind the ⓘ beside the title
 	Subtitle string      `json:"subtitle"` // the old name for info, still read
-	Kind     string      `json:"kind"`     // line | hour | instant | runs | snapshot | sizes
+	Kind     string      `json:"kind"`     // line | hour | instant | runs | snapshot | sizes | clock
 	Unit     string      `json:"unit"`
 	Range    string      `json:"range"`       // fixed range for this page ("" = the selected one)
 	MinRange string      `json:"min_range"`   // follows the selected range, but never shorter (daily data)
@@ -124,7 +126,12 @@ type PageCfg struct {
 	MinValue float64     `json:"min_value"`
 	Limit    int         `json:"limit"`
 	Note     string      `json:"note"`
-	Span     [2]int      `json:"span"` // [columns, rows] in the web grid; 0 = automatic
+	Span     [2]int      `json:"span"`     // [columns, rows] in the web grid; 0 = automatic
+	Clock    *ClockCfg   `json:"clock"`    // clock: one row per day, time of day across (clock.go)
+	Mark     string      `json:"mark"`     // days: "bar" (an amount from zero) or "dot" (a level); days.go
+	Day      string      `json:"day"`      // days: how a day's hourly values reduce: max | sum | min | last
+	Baseline int         `json:"baseline"` // days: shade the usual range over this many days before each
+	Empty    string      `json:"empty"`    // said instead of "no data in this range", e.g. what the data waits for
 }
 
 type ref struct {
@@ -153,6 +160,11 @@ type model struct {
 	rng     string // what the page shows: a range (see drawn), "now" or "snapshot"
 	events  []event
 	blocks  []block
+	rows    []clockRow // clock: one per day
+	mark    string     // days: bar | dot
+	bands   []band     // a range behind a line (lo/hi) or a days page's usual range
+	empty   string
+	clock   ClockCfg
 	note    string
 	start   time.Time
 	end     time.Time
@@ -258,6 +270,35 @@ func finishConfig(c *Config) (*Config, error) {
 		if p.MinRange != "" {
 			if _, ok := rangeByName(p.MinRange); !ok {
 				return nil, fmt.Errorf("page %s: unknown min_range %q", p.ID, p.MinRange)
+			}
+		}
+		if p.Kind == "days" {
+			if len(p.Series) == 0 {
+				return nil, fmt.Errorf("page %s: a days page needs series", p.ID)
+			}
+			if p.Mark != "" && p.Mark != "bar" && p.Mark != "dot" {
+				return nil, fmt.Errorf("page %s: mark is bar (an amount from zero) or dot (a level), not %q", p.ID, p.Mark)
+			}
+			if p.Day != "" && p.Day != "max" && p.Day != "sum" && p.Day != "min" && p.Day != "last" {
+				return nil, fmt.Errorf("page %s: day is max, sum, min or last, not %q", p.ID, p.Day)
+			}
+			if p.Stack && p.Mark == "dot" {
+				return nil, fmt.Errorf("page %s: only bars stack", p.ID)
+			}
+		} else if p.Mark != "" || p.Day != "" || p.Baseline != 0 {
+			return nil, fmt.Errorf("page %s: mark, day and baseline belong to days pages", p.ID)
+		}
+		for _, s := range p.Series {
+			if (s.Lo == "") != (s.Hi == "") || (s.Lo != "" && p.Kind != "line") {
+				return nil, fmt.Errorf("page %s: lo and hi come as a pair, on line pages", p.ID)
+			}
+		}
+		if p.Kind == "clock" {
+			if p.Clock == nil || p.Expr == "" {
+				return nil, fmt.Errorf("page %s: a clock page needs expr and clock", p.ID)
+			}
+			if err := p.Clock.validate(); err != nil {
+				return nil, fmt.Errorf("page %s: %v", p.ID, err)
 			}
 		}
 	}
@@ -393,7 +434,7 @@ func (p page) tag(r rng) string {
 // names its own window ("30d", plus "not live" on the live range).
 func (p page) windowed() bool {
 	switch p.Kind {
-	case "line", "runs":
+	case "line", "runs", "clock", "days":
 		return true
 	case "instant":
 		return strings.Contains(p.Expr, "$__range")
@@ -425,7 +466,9 @@ func modeOf(ps []page) groupMode {
 	var lo rng
 	n, anyLive := 0, false
 	for _, p := range ps {
-		if !p.windowed() {
+		// a days page widens itself to its min_range (a week of nights at the 24h setting, its
+		// header tag saying so) rather than taking the 24h view away from the rest of its tab
+		if !p.windowed() || p.Kind == "days" {
 			continue
 		}
 		f := p.floor()
@@ -488,7 +531,7 @@ func withRange(expr string, r rng) string {
 // shows instead (e.g. pool free space only means something over 90 days).
 func (p page) fetch(sel rng) model {
 	r := p.drawn(sel)
-	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, split: p.Split, log: p.Log, note: p.Note, rng: p.tag(sel)}
+	m := model{kind: "line", unit: p.Unit, yMin: p.YMin, yMax: p.YMax, thermal: p.Thermal, stack: p.Stack, split: p.Split, log: p.Log, note: p.Note, rng: p.tag(sel), empty: p.Empty}
 	end := time.Now()
 	start := end.Add(-r.span)
 	switch p.Kind {
@@ -516,6 +559,9 @@ func (p page) fetch(sel rng) model {
 		m.start, m.end, m.step = start, end, r.step
 		m.refs = p.resolveRefs()
 		m.events = p.cfg.eventsIn(start, end)
+		m.bands = p.lineBands(start, end, r.step)
+	case "days":
+		p.fetchDays(&m, start, end, time.Local)
 	case "hour":
 		m.kind = "bars"
 		s, err := rangeSeries([]q{{expr: p.Expr, name: "v"}}, end.Add(-p.profileRange().span), end, time.Hour)
@@ -583,6 +629,14 @@ func (p page) fetch(sel rng) model {
 		if bars, unit, ok := barsFromText(m.lines); ok { // an hbar figure → real bars
 			m.kind, m.bars, m.unit, m.lines = "bars", bars, unit, nil
 		}
+	case "clock":
+		m.kind, m.clock = "clock", *p.Clock
+		s, err := rangeSeries([]q{{expr: p.Expr, name: "v"}}, start, end, time.Duration(p.Clock.Cell)*time.Minute)
+		m.err = err
+		if err == nil && len(s) > 0 {
+			m.rows = clockRows(s[0], *p.Clock, start, end, end, time.Local)
+		}
+		m.start, m.end = start, end
 	case "sizes":
 		m.kind = "blocks"
 		m.blocks, m.unit, m.note, m.err = sizesBlocks(p.cfg)

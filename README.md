@@ -166,16 +166,19 @@ solid, chalky colours; colour only ever names a series or carries a temperature.
 
 ## Chart styles
 
-Six, and every page is one of them. Each follows the same rules: a title of a few words,
+Seven, and every page is one of them. Each follows the same rules: a title of a few words,
 numbers printed, a comparison on the chart, no legend to decode.
 
 | style | config | use it for |
 |---|---|---|
 | **line** | `kind: line` | one to four series over time. Named at the right end; reference values dashed. `log` for values spanning orders of magnitude (latency). |
 | **stack** | `kind: line`, `stack: true` | parts of a whole over time (memory, CPU by kind). Bands are solid tints, named at their middle. |
+| **range** | `kind: line`, `lo` + `hi` on a series | a level and its spread over time (heart rate): the line, with a pale band from its lowest to highest in each point behind it. |
+| **days** | `kind: days` | one figure per day (sleep, steps, a night's heart rate variability). `mark: bar` for an amount from zero, stackable; `mark: dot` for a level, joined only to a day that has one. `baseline` shades the reader's usual range behind each day. Each day prints its number when there is room. |
 | **small multiples** | `kind: line`, `split: true` | series on very different scales (free space per pool): one panel each, one time axis. |
 | **bars** | `instant`, `runs`, `hour` | a ranked list or a profile. Block cells, value at the end, a reference rule where one exists. |
 | **blocks** | `capacity`, `sizes` | how full something is, or what fills it: a row of cells per thing, free space as empty cells. |
+| **clock** | `kind: clock` | when in the day something happens, day after day (sleep stages, movement): one row per day on a shared clock axis, the actogram sleep researchers draw. Cell height carries the value, so it reads in one ink; each row ends with its number. |
 | **table** | `snapshot` | a handful of numbers a reader would rather read than estimate. |
 
 Horizontal bars are drawn as runs of small cells, like a row of `█` in a terminal — the same
@@ -297,17 +300,19 @@ if a fetch takes over 150 ms, a draw over 100 ms, or a live tick over one 16 ms 
 
 | kind | draws | keys |
 |---|---|---|
-| `line` | time series | `series[]` (`expr` + `name`, or `label` to name each result), `refs[]` (`value` or `expr`, + `label`), `ymin`/`ymax` (the axis reaches at least these, so a quiet chart lies flat instead of blowing noise up to full height; `ymax: 100` is also a hard top, for percentages), `stack` for parts of a whole, `split` for one panel per series on its own scale, `thermal` to colour a line by temperature, `live` to follow the live range, `live_window` for how far a live `rate()` looks back (default `5s`), `log` for a log scale |
+| `line` | time series | `series[]` (`expr` + `name`, or `label` to name each result), `refs[]` (`value` or `expr`, + `label`), `ymin`/`ymax` (the axis reaches at least these, so a quiet chart lies flat instead of blowing noise up to full height; `ymax: 100` is also a hard top, for percentages), `stack` for parts of a whole, `split` for one panel per series on its own scale, `thermal` to colour a line by temperature, `live` to follow the live range, `live_window` for how far a live `rate()` looks back (default `5s`), `log` for a log scale, `lo` and `hi` on a series for a range drawn behind it (`min_over_time(x[$__step])`, where `$__step` is the width of one point) |
+| `days` | one slot per local calendar day. Each `expr` is evaluated hourly, with windows covering each clock hour exactly (so a figure stamped at midnight lands in its own day), and a day's hourly values reduce by `day`: `max` (default: daily figures, running totals), `sum` (rollups of finer data), `min` or `last`. Write exprs as hourly rollups: `max(last_over_time(x[1h]))`, `sum(count_gt_over_time(x[1h], 2)) * 15`. With `min_range` it widens itself (7 days at the 24h setting, its tag saying so) and does not raise its tab's floor | `series[]`, `mark` (`bar` or `dot`), `stack` (bars only), `day`, `baseline` (days: mean ± one standard deviation of the first series over that many days before each, once there are five), `refs[]`, `ymin`/`ymax` |
 | `hour` | mean by hour of day over a fixed window (`range`, default 30d), as bars; a pattern, so it does not follow the picker | `expr` |
 | `capacity` | how full each thing is, as block rows | `key`: a snapshot section of `name (USED of TOTAL UNIT)` lines; `refs` in % |
 | `instant` | one bar per result of an instant query: a reading now, or, with `$__range` in the query (`increase(x[$__range])`), a total over the selected range | `expr`, `label`, `min_value`, `limit` |
 | `runs` | one bar per run of a job, de-duplicated on the run's own timestamp | `expr`, `key` |
 | `snapshot` | a section of the snapshot file; a bar figure becomes real bars | `key` |
 | `sizes` | a backup sizes table as block rows, one per store, split by target | — |
+| `clock` | one row per day, time of day across, cells `cell` minutes wide. With `states` (top to bottom, first tallest) each cell is a state and the row's number is the hours in every state but the first; without, cells are shaded and sized by amount and the number is the minutes at or above `threshold`. A window crossing midnight is named by the day it ends on. Rows before the first reading are left off; a day with none inside the data is a blank row | `expr` (one series; wrap in `last_over_time(x[<cell>m])`), `clock`: `from` (hour), `hours`, `cell` (minutes), `states[]` (`value` + `name`), `threshold`, `count` (what `-print` calls the row's number) |
 
 Every page also takes `title` (what, in a few words), `info` (so what, one sentence, behind the ⓘ; `subtitle` is the old name and still read), `unit`, `range` (`now` or
 `snapshot`, for a reading), `min_range` (the shortest range a chart covering time can show, e.g.
-`7d` for daily data; it raises its tab's floor), `note` (a visible label under the chart, 50 characters at most — explanations go in `info`), `requires` (a query that must return something, or the page is left out), and `span: [columns, rows]` to give it more of the grid. A tile's header names the range it
+`7d` for daily data; it raises its tab's floor), `note` (a visible label under the chart, 50 characters at most — explanations go in `info`), `empty` (said instead of "no data in this range", e.g. what the data is waiting for), `requires` (a query that must return something, or the page is left out), and `span: [columns, rows]` to give it more of the grid. A tile's header names the range it
 actually draws. A chart covering time cannot pin its own `range`: askee refuses to load it and
 asks for `min_range`, so no chart ever shows a different span from the one the picker names.
 

@@ -92,6 +92,8 @@ func printGroup(cfg *Config, g string, r rng, w, h int) int {
 			ph = len(m.bars) + 3
 		case "text":
 			ph = len(m.lines) + 3
+		case "clock":
+			ph = len(m.rows) + 4
 		}
 		s := newScreen(w, ph, th)
 		panel(s, cfg, p, m, 0, 0, w-1, ph-1, r.name)
@@ -113,6 +115,11 @@ func printGroup(cfg *Config, g string, r rng, w, h int) int {
 			}
 			fmt.Fprintf(out, "  %-18s latest %-8s min %-8s max %-8s mean %-8s %s (n=%d)\n", se.name,
 				fmtVal(se.v[len(se.v)-1]), fmtVal(mn), fmtVal(mx), fmtVal(sum/float64(len(se.v))), m.unit, len(se.v))
+		}
+		if m.kind == "clock" {
+			for _, l := range clockSummary(m) {
+				fmt.Fprintln(out, l)
+			}
 		}
 		for _, rf := range m.refs {
 			u := m.unit
@@ -155,6 +162,11 @@ type tileJSON struct {
 	Drawn   string       `json:"drawn,omitempty"` // what is shown: a range ("live" slides with the clock), "now" or "snapshot"
 	Blocks  []block      `json:"blocks,omitempty"`
 	Events  []event      `json:"events,omitempty"`
+	Rows    []clockRow   `json:"rows,omitempty"`  // clock
+	Clock   *ClockCfg    `json:"clock,omitempty"` // clock: the window, cell and states
+	Mark    string       `json:"mark,omitempty"`  // days: bar | dot
+	Bands   []band       `json:"bands,omitempty"` // a range behind a line, or a days page's usual range
+	Empty   string       `json:"empty,omitempty"` // said when there is no data
 }
 type seriesJSON struct {
 	Name string    `json:"name"`
@@ -167,6 +179,11 @@ func toTile(p page, m model) tileJSON {
 		YMin: m.yMin, YMax: m.yMax, Thermal: m.thermal, Stack: m.stack, Refs: m.refs, Bars: m.bars, Lines: m.lines, Step: m.step.Seconds(), Span: p.Span, Split: m.split, Events: m.events, Log: m.log, Blocks: m.blocks, Drawn: m.rng}
 	if m.err != nil {
 		t.Err = m.err.Error()
+	}
+	t.Mark, t.Bands, t.Empty = m.mark, m.bands, m.empty
+	if m.kind == "clock" {
+		c := m.clock
+		t.Rows, t.Clock = m.rows, &c
 	}
 	if !m.start.IsZero() {
 		t.Start, t.End = m.start.Unix(), m.end.Unix()
@@ -363,8 +380,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 // ── group cache ─────────────────────────────────────────────────────────────────────
 // Clicking a group must feel instant, so a request never waits on the TSDB if anything is
 // cached: a stale entry is served at once and refreshed in the background (one refresh per
-// key at a time). A warmer keeps every group at the default and live ranges fresh, so even
-// the first click after a quiet hour is a cache hit. Bodies are stored gzipped too: a
+// key at a time). A warmer keeps every group at the default range fresh, so even the first
+// click after a quiet hour is a cache hit. It does NOT warm the live range: a live entry is
+// stale after 0.9 s, so warming it rebuilt every group every 20 s (32 of a 40-page catalogue's pages
+// fall back to a 1h database query in the live view) and kept the once-a-second live reader
+// running with nobody watching — 38% of a core on an idle box (2026-11-06). Live is only
+// worth building for someone looking at it. Bodies are stored gzipped too: a
 // 90-day group is ~100 KB of JSON and ~15 KB compressed, which matters over a phone link.
 type cacheEntry struct {
 	at       time.Time
@@ -432,18 +453,18 @@ func newGroupCache(cfg *Config, all []page, gen int64) *groupCache {
 			default:
 			}
 			def, _ := rangeByName(cfg.DefaultRange)
-			live, _ := rangeByName("live")
 			for _, g := range cfg.Groups {
 				if len(groupPages(all, g.ID)) == 0 {
 					continue
 				}
-				for _, r := range []rng{def, live} {
-					gc.mu.Lock()
-					e := gc.entries[g.ID+"|"+r.name]
-					gc.mu.Unlock()
-					if e == nil || time.Since(e.at) > ttl(r) {
-						gc.refresh(g.ID, r)
-					}
+				if def.name == "live" {
+					continue // never warm live; see the comment above
+				}
+				gc.mu.Lock()
+				e := gc.entries[g.ID+"|"+def.name]
+				gc.mu.Unlock()
+				if e == nil || time.Since(e.at) > ttl(def) {
+					gc.refresh(g.ID, def)
 				}
 			}
 			select {

@@ -276,7 +276,11 @@ func drawLineArea(s *screen, m model, x0, y0, x1, y1 int, thermal [2]float64, xA
 	}
 	lo, hi, ok := yRange(m, ss)
 	if !ok {
-		s.text(px0+2, py0+ph/2, "no data in this range", th.Dim, false)
+		msg := "no data in this range"
+		if m.empty != "" {
+			msg = m.empty
+		}
+		s.text(px0+2, py0+ph/2, msg, th.Dim, false)
 		return nil
 	}
 	Y := func(v float64) int { return py0 + int((1-(v-lo)/(hi-lo))*float64(ph-1)+0.5) }
@@ -583,7 +587,7 @@ func panel(s *screen, cfg *Config, p page, m model, x0, y0, x1, y1 int, rangeNam
 	case m.err != nil:
 		s.box(x0, y0, x1, y1, title, sub, nil)
 		s.text(x0+3, y0+2, "error: "+m.err.Error(), th.Accent, false)
-	case m.kind == "line":
+	case m.kind == "line" || m.kind == "days": // text draws a day series as its line
 		leg := drawLine(s, m, x0, y0, x1, y1, cfg.Thermal)
 		s.box(x0, y0, x1, y1, title, sub, leg)
 		if st := statsLine(m); st != "" && !m.split {
@@ -592,6 +596,9 @@ func panel(s *screen, cfg *Config, p page, m model, x0, y0, x1, y1 int, rangeNam
 	case m.kind == "bars":
 		s.box(x0, y0, x1, y1, title, sub, nil)
 		drawBars(s, m, x0, y0, x1, y1)
+	case m.kind == "clock":
+		s.box(x0, y0, x1, y1, title, sub, nil)
+		drawClock(s, m, x0, y0, x1, y1)
 	default:
 		s.box(x0, y0, x1, y1, title, sub, nil)
 		drawText(s, m, x0, y0, x1, y1)
