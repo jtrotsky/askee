@@ -106,6 +106,9 @@ let pick = "24h";
 const rix = r => META.ranges.indexOf(r);
 function rangeFor(g) { const m = META.groups[g].min; return m && rix(pick) < rix(m) ? m : pick; }
 const $ = id => document.getElementById(id);
+// Every date, time and number is formatted in NZ style (10/11/2026, 09 Nov, 1,234), never the
+// browser's locale: a laptop set to en-US flipped the hover dates to month-first.
+const LOC = "en-NZ";
 
 function fmt(v) {
   const a = Math.abs(v);
@@ -114,15 +117,15 @@ function fmt(v) {
   if (a >= 1e9) return s3(v/1e9) + "B";
   if (a >= 1e6) return s3(v/1e6) + "M";
   if (a >= 1e4) return s3(v/1e3) + "K";
-  if (a >= 1000) return Math.round(v).toLocaleString("en-NZ");   // thousands separator
+  if (a >= 1000) return Math.round(v).toLocaleString(LOC);   // thousands separator
   if (a >= 100) return v.toFixed(0);
   if (a >= 10) return v.toFixed(1);
   return v.toFixed(2);
 }
 function tfmt(t, span) {
   const d = new Date(t * 1000);
-  if (span > 36*3600) return d.toLocaleDateString(undefined, {day:"2-digit", month:"short"});
-  return d.toLocaleTimeString(undefined, {hour:"2-digit", minute:"2-digit", hour12:false});
+  if (span > 36*3600) return d.toLocaleDateString(LOC, {day:"2-digit", month:"short"});
+  return d.toLocaleTimeString(LOC, {hour:"2-digit", minute:"2-digit", hour12:false});
 }
 // colour helpers — the same maths as the Go side (themes.go)
 const hx = h => [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
@@ -326,7 +329,7 @@ function panel(c, t, raw, b, opts) {
   let lastY = Infinity;
   // a tick shows as many decimals as its step needs: 0, 10, 20 — not 0.00, 10.0, 20.0
   const st = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : 1;
-  const tf = v => t.log || Math.abs(v) >= 1e4 ? fmt(v) : v.toLocaleString("en-NZ", {maximumFractionDigits: Math.max(0, -Math.floor(Math.log10(st) + 1e-9)) + (st / Math.pow(10, Math.floor(Math.log10(st))) === 2.5 ? 1 : 0)});
+  const tf = v => t.log || Math.abs(v) >= 1e4 ? fmt(v) : v.toLocaleString(LOC, {maximumFractionDigits: Math.max(0, -Math.floor(Math.log10(st) + 1e-9)) + (st / Math.pow(10, Math.floor(Math.log10(st))) === 2.5 ? 1 : 0)});
   ticks.forEach((v, i) => {
     const y = Y(v); if (lastY - y < 12) return;
     c.fillRect(ax - 3, Math.round(y), 3, 1);
@@ -516,7 +519,7 @@ function drawDays(cv, t) {
   const Y = v => T + (1 - (v - lo) / (hi - lo)) * ph, X = i => L + (i + 0.5) * sw;
   // range-frame axis, as on a line
   const ax = L - 5, st = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) : 1;
-  const tf = v => Math.abs(v) >= 1e4 ? fmt(v) : v.toLocaleString("en-NZ", {maximumFractionDigits: Math.max(0, -Math.floor(Math.log10(st) + 1e-9)) + (st / Math.pow(10, Math.floor(Math.log10(st))) === 2.5 ? 1 : 0)});
+  const tf = v => Math.abs(v) >= 1e4 ? fmt(v) : v.toLocaleString(LOC, {maximumFractionDigits: Math.max(0, -Math.floor(Math.log10(st) + 1e-9)) + (st / Math.pow(10, Math.floor(Math.log10(st))) === 2.5 ? 1 : 0)});
   const flo = bar ? Math.min(0, dlo) : dlo, fhi = stack ? Math.max(dhi, ...days.map((_, i) => top(i) ?? -Infinity)) : dhi;
   c.strokeStyle = TH.vars[5]; c.lineWidth = 1; c.setLineDash([]);
   c.beginPath(); c.moveTo(ax + .5, Math.round(Y(fhi))); c.lineTo(ax + .5, Math.round(Y(flo)) + 1); c.stroke();
@@ -592,8 +595,8 @@ function drawDays(cv, t) {
   }
   // day axis: every day when there is room, else 3–5 of them
   c.fillStyle = TH.vars[5]; c.textAlign = "center";
-  const name = ts => { const d = new Date(ts * 1000); return days.length <= 14 ? d.toLocaleDateString("en-NZ", {weekday: "short"}) + " " + String(d.getDate()).padStart(2, "0")
-    : d.toLocaleDateString("en-NZ", {day: "2-digit", month: "short"}); };
+  const name = ts => { const d = new Date(ts * 1000); return days.length <= 14 ? d.toLocaleDateString(LOC, {weekday: "short"}) + " " + String(d.getDate()).padStart(2, "0")
+    : d.toLocaleDateString(LOC, {day: "2-digit", month: "short"}); };
   const lw = c.measureText(name(days[0])).width + 8, every = Math.max(1, Math.ceil(lw / sw), Math.ceil(days.length / (sw * days.length > 520 ? 7 : 5)));
   for (let i = days.length - 1; i >= 0; i -= every) c.fillText(name(days[i]), Math.min(Math.max(X(i), L + lw / 2), L + pw - lw / 2), T + ph + 11);
   return {L, pw, sw, days, vals, band};
@@ -605,7 +608,7 @@ function hoverDays(el, cv, t, g) {
     if (i < 0 || i >= g.days.length) { tip.style.display = "none"; return; }
     const rows = (t.series || []).map((s, j) => g.vals[j][i] == null ? `${s.name} no reading` : `${s.name} <b>${fmt(g.vals[j][i])}${t.unit || ""}</b>`);
     if (g.band && g.band.lo[i] != null) rows.push(`usual ${fmt(g.band.lo[i])}–${fmt(g.band.hi[i])}${t.unit || ""}`);
-    tipAt(el, tip, e, cv, `<div class="tnote">${new Date(g.days[i] * 1000).toLocaleDateString("en-NZ", {weekday: "long", day: "numeric", month: "long"})}</div>` + rows.join("<br>"));
+    tipAt(el, tip, e, cv, `<div class="tnote">${new Date(g.days[i] * 1000).toLocaleDateString(LOC, {weekday: "long", day: "numeric", month: "long"})}</div>` + rows.join("<br>"));
   });
   cv.addEventListener("mouseleave", () => tip.style.display = "none");
 }
@@ -704,7 +707,7 @@ function hoverClock(el, cv, t, g) {
     const v = r.v[k], at = new Date((r.start + k * ck.cell * 60) * 1000);
     const st = states.find(s => s.value === v);
     const what = v == null ? "no reading" : st ? st.name : `${fmt(v)} ${t.unit || ""}`;
-    tipAt(el, tip, e, cv, `<div class="tnote">${r.label} ${at.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", hour12: false})}</div><b>${what}</b>` + (r.text ? `<br>day: ${r.text}` : ""));
+    tipAt(el, tip, e, cv, `<div class="tnote">${r.label} ${at.toLocaleTimeString(LOC, {hour: "2-digit", minute: "2-digit", hour12: false})}</div><b>${what}</b>` + (r.text ? `<br>day: ${r.text}` : ""));
   });
   cv.addEventListener("mouseleave", () => tip.style.display = "none");
 }
@@ -908,7 +911,7 @@ function render() {
   stamp();
   if (same) { scrollTo(0, y); grid.style.minHeight = ""; } else scrollTo(0, 0);
 }
-function stamp() { $("stamp").textContent = "updated " + new Date(data.generated*1000).toLocaleTimeString(undefined, {hour12:false}); }
+function stamp() { $("stamp").textContent = "updated " + new Date(data.generated*1000).toLocaleTimeString(LOC, {hour12:false}); }
 
 function tipAt(el, tip, e, cv, html) {
   const r = cv.getBoundingClientRect();
@@ -928,7 +931,7 @@ function hoverLine(el, cv, t, g) {
       const col = t.thermal ? thermalAt(s.v[k]) : PAL[i % PAL.length];
       return s.v.length ? `<span style="color:${col}">■</span> ${s.name} ${fmt(s.v[k])}${t.unit || ""}` : "";
     }).filter(Boolean);
-    tipAt(el, tip, e, cv, `<div class="tnote">${new Date(ts*1000).toLocaleString(undefined, {hour12:false})}</div>` + rows.join("<br>"));
+    tipAt(el, tip, e, cv, `<div class="tnote">${new Date(ts*1000).toLocaleString(LOC, {day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", hour12:false})}</div>` + rows.join("<br>"));
   });
   cv.addEventListener("mouseleave", () => tip.style.display = "none");
 }
