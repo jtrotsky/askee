@@ -508,7 +508,8 @@ function drawDays(cv, t) {
   // margin: each series' latest value, each reference, the usual range
   const lastIdx = v => { for (let i = v.length - 1; i >= 0; i--) if (v[i] != null) return i; return -1; };
   const labels = [];
-  const L = 58, T = 10, B = 20;
+  // each day's number prints above its mark: the top needs room for it, or the highest day's is cut off
+  const L = 58, T = 24, B = 20;
   const texts = S.map((s, j) => { const k = lastIdx(vals[j]); return k < 0 ? "" : (S.length > 1 ? s.name + " " : "") + fmt(vals[j][k]) + u; });
   const bandText = band ? (() => { const k = lastIdx(band.lo); return k < 0 ? "" : `usual ${fmt(band.lo[k])}–${fmt(band.hi[k])}${u}`; })() : "";
   const R = Math.min(W * 0.4, Math.max(24, ...texts.map(x => 16 + c.measureText(x).width),
