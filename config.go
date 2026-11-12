@@ -26,7 +26,7 @@ type Config struct {
 	VM           string     `json:"vm"`
 	Snapshot     string     `json:"snapshot"`      // markdown file of `### key` sections (root-only figures)
 	Sizes        string     `json:"sizes"`         // a sizes table, TARGET LOCAL then one column per store
-	PricePerTB   float64    `json:"price_per_tb"`  // for the cost column of the sizes table
+	PricePerTB   float64    `json:"price_per_tb"`  // $/TB-month for COLD when size_prices is empty
 	PriceLabel   string     `json:"price_label"`   // e.g. "cold $/mo"
 	Thermal      [2]float64 `json:"thermal_range"` // °C mapped to the cool→hot ramp
 	DefaultRange string     `json:"default_range"`
@@ -43,6 +43,10 @@ type Config struct {
 	// SizeLabels names the columns of the sizes file in plain words, e.g.
 	// {"NAS": "home NAS", "COLD": "cold cloud"}. Unnamed columns show lower-cased.
 	SizeLabels map[string]string `json:"size_labels"`
+	// SizePrices is $/TB-month per sizes-file column, e.g. {"VAULT": 7.5, "COLD": 0}. A
+	// column named here shows a monthly cost, $0 included; others show none. Empty means
+	// {"COLD": price_per_tb}, the single priced store before per-store prices existed.
+	SizePrices map[string]float64 `json:"size_prices"`
 	// Packs names the built-in chart packs to include (packs.go). Absent with no pages of
 	// its own, a config gets every pack; pages the database cannot fill are dropped.
 	Packs          []string  `json:"packs"`
@@ -795,60 +799,39 @@ func cleanSnapshot(body string) []string {
 	return out
 }
 
-// ── sizes table: a 4-column text table TARGET LOCAL <REMOTE> <BILLED> in human units
-// (B/KB/MB/GB/TB/PB); the header row names the two remote columns; cost is on the last ──
+// ── sizes table: TARGET LOCAL <STORE>... in human units (B/KB/MB/GB/TB/PB, decimal); the
+// header row names the store columns, so a new store is a new column, not a code change ──
+
+// byteSuffix is checked longest first so "1.4TB" is never read as 1.4T bytes.
+var byteSuffix = []string{"PB", "TB", "GB", "MB", "KB", "B"}
+
+// parseHuman reads "1.44TB" (or "1.44 TB" once sizeFields has joined it) as bytes. Decimal
+// units, as the sizes file writes them: 1 TB = 1e12 bytes.
 func parseHuman(s string) float64 {
 	s = strings.TrimSpace(s)
-	for _, u := range []struct {
-		u string
-		m float64
-	}{{"PB", 1 << 50}, {"TB", 1 << 40}, {"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10}, {"B", 1}} {
-		if strings.HasSuffix(s, u.u) {
-			f, _ := strconv.ParseFloat(strings.TrimSuffix(s, u.u), 64)
-			return f * u.m
+	for _, u := range byteSuffix {
+		if strings.HasSuffix(s, u) {
+			f, _ := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(s, u)), 64)
+			return f * byteUnit[u]
 		}
 	}
 	return 0
 }
 
-func sizesTable(c *Config) ([]string, string, error) {
-	b, err := os.ReadFile(c.Sizes)
-	if err != nil {
-		return nil, "", fmt.Errorf("no sizes yet (%v)", err)
-	}
-	st, _ := os.Stat(c.Sizes)
-	type row struct {
-		f              []string
-		billed, remote float64
-	}
-	var rows []row
-	hdr := []string{"TARGET", "LOCAL", "REMOTE", "BILLED"}
-	for _, l := range strings.Split(string(b), "\n") {
-		f := strings.Fields(l)
-		if len(f) == 4 && f[0] == "TARGET" {
-			hdr = f
-			continue
+// sizeFields splits a row on whitespace and joins a lone unit to the number before it, so
+// "1.44 TB" and "1.44TB" both make one cell. Without this a spaced file shifts every column.
+func sizeFields(l string) []string {
+	var out []string
+	for _, f := range strings.Fields(l) {
+		if _, ok := byteUnit[f]; ok && len(out) > 0 {
+			if _, err := strconv.ParseFloat(out[len(out)-1], 64); err == nil {
+				out[len(out)-1] += f
+				continue
+			}
 		}
-		if len(f) != 4 || strings.HasPrefix(f[0], "─") {
-			continue
-		}
-		rows = append(rows, row{f, parseHuman(f[3]), parseHuman(f[2])})
+		out = append(out, f)
 	}
-	if len(rows) == 0 {
-		return nil, "", fmt.Errorf("sizes file has no rows")
-	}
-	total := rows[len(rows)-1]
-	rows = rows[:len(rows)-1]
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].billed+rows[i].remote > rows[j].billed+rows[j].remote })
-	lines := []string{fmt.Sprintf("%-24s %9s %9s %9s %9s", "target", "local", strings.ToLower(hdr[2]), hdr[3], c.PriceLabel)}
-	for _, r := range rows {
-		if r.billed+r.remote < 50<<20 {
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("%-24s %9s %9s %9s %9.2f", r.f[0], r.f[1], r.f[2], r.f[3], r.billed/(1<<40)*c.PricePerTB))
-	}
-	lines = append(lines, "", fmt.Sprintf("%-24s %9s %9s %9s %9.2f", "TOTAL", total.f[1], total.f[2], total.f[3], total.billed/(1<<40)*c.PricePerTB))
-	return lines, fmt.Sprintf("snapshot %s · $%.2f per TB-month · local '-' = not walked", st.ModTime().Format("02 Jan 15:04"), c.PricePerTB), nil
+	return out
 }
 
 // barsFromText recognises a report-kit hbar figure ("label  ████▌  123.4 unit" per line) so a
@@ -940,40 +923,38 @@ var capLine = regexp.MustCompile(`^\s*(\S+)\s+\(([\d.]+) of ([\d.]+) (\w+)`)
 
 func trimNum(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
-// sizesBlocks turns the backup sizes table (TARGET LOCAL NAS COLD, human sizes) into one block
-// row per store, each split into the biggest targets plus "other", so the reader sees both
-// how much each store holds and what fills it.
+// sizesBlocks turns the backup sizes table (TARGET LOCAL <STORE>..., human sizes) into one
+// block row per column, each split into the biggest targets plus "other", so the reader sees
+// both how much each store holds and what fills it. Any number of stores: the header says
+// how many. Stores named in size_prices carry a monthly cost at their own $/TB-month.
 func sizesBlocks(c *Config) ([]block, string, string, error) {
 	b, err := os.ReadFile(c.Sizes)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("no sizes yet (%v)", err)
 	}
 	st, _ := os.Stat(c.Sizes)
-	hdr := []string{"TARGET", "LOCAL", "REMOTE", "BILLED"}
+	var hdr []string
 	type row struct {
 		name string
-		v    [3]float64
+		v    []float64 // GB per column: LOCAL, then each store
 	}
 	var rows []row
 	var estimated []string
 	for _, l := range strings.Split(string(b), "\n") {
-		f := strings.Fields(l)
-		if len(f) == 4 && f[0] == "TARGET" {
+		f := sizeFields(l)
+		if len(f) >= 3 && f[0] == "TARGET" {
 			hdr = f
 			continue
 		}
-		if len(f) != 4 || strings.HasPrefix(f[0], "─") {
-			continue
+		if hdr == nil || len(f) != len(hdr) || strings.HasPrefix(f[0], "─") || f[0] == "TOTAL" {
+			continue // TOTAL is summed from the rows, so an estimated row is counted too
 		}
-		r := row{name: f[0]}
-		for i := 0; i < 3; i++ {
-			r.v[i] = parseHuman(f[i+1]) / 1e9 // GB
+		r := row{name: f[0], v: make([]float64, len(f)-1)}
+		for i := range r.v {
+			r.v[i] = parseHuman(f[i+1]) / 1e9
 		}
-		if f[0] == "TOTAL" {
-			continue // summed from the rows, so an estimated row is counted too
-		}
-		if f[1] == "-" && r.v[1] > 0 {
-			// too big to walk nightly: the NAS copy is the best figure for what is here
+		if f[1] == "-" && len(r.v) > 1 && r.v[1] > 0 {
+			// too big to walk nightly: the first store (the NAS) is the best figure for what is here
 			r.v[0] = r.v[1]
 			estimated = append(estimated, r.name)
 		}
@@ -982,21 +963,36 @@ func sizesBlocks(c *Config) ([]block, string, string, error) {
 	if len(rows) == 0 {
 		return nil, "", "", fmt.Errorf("sizes file has no rows")
 	}
-	// the same top targets in every row, so a segment means the same thing all the way down
-	sort.SliceStable(rows, func(i, j int) bool {
-		return math.Max(rows[i].v[1], rows[i].v[2]) > math.Max(rows[j].v[1], rows[j].v[2])
-	})
+	ncol := len(hdr) - 1
+	// the same top targets in every row, so a segment means the same thing all the way down;
+	// ranked by the largest store copy
+	biggest := func(r row) float64 {
+		m := 0.0
+		for _, v := range r.v[1:] {
+			m = math.Max(m, v)
+		}
+		return m
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return biggest(rows[i]) > biggest(rows[j]) })
 	const top = 5
-	names := map[string]string{"LOCAL": "on this box", "REMOTE": "remote", "BILLED": "billed"}
+	names := map[string]string{"LOCAL": "on this box"}
 	for k, v := range c.SizeLabels { // a store's plain name, e.g. "NAS": "home NAS"
 		names[strings.ToUpper(k)] = v
 	}
+	prices := map[string]float64{}
+	for k, v := range c.SizePrices {
+		prices[strings.ToUpper(k)] = v
+	}
+	if len(c.SizePrices) == 0 && c.PricePerTB > 0 {
+		prices["COLD"] = c.PricePerTB // the one priced store before size_prices existed
+	}
 	var out []block
-	for col := 0; col < 3; col++ {
+	for col := 0; col < ncol; col++ {
 		var bl block
-		bl.Label = names[hdr[col+1]]
+		key := hdr[col+1]
+		bl.Label = names[key]
 		if bl.Label == "" {
-			bl.Label = strings.ToLower(hdr[col+1])
+			bl.Label = strings.ToLower(key)
 		}
 		other := 0.0
 		for i, r := range rows {
@@ -1012,8 +1008,8 @@ func sizesBlocks(c *Config) ([]block, string, string, error) {
 			sum += s.V
 		}
 		bl.Text = fmtGB(sum)
-		if hdr[col+1] == "COLD" && c.PricePerTB > 0 {
-			bl.Text += fmt.Sprintf(" · $%.2f/mo", sum/1000*c.PricePerTB)
+		if p, ok := prices[key]; ok {
+			bl.Text += fmt.Sprintf(" · $%.2f/mo", sum/1000*p)
 		}
 		out = append(out, bl)
 	}

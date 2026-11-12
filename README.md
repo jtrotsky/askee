@@ -286,8 +286,10 @@ if a fetch takes over 150 ms, a draw over 100 ms, or a live tick over one 16 ms 
   "live_source": "http://127.0.0.1:9100/metrics?collect[]=cpu&collect[]=loadavg&collect[]=netdev",
   "live_sources": ["http://127.0.0.1:4000/metrics"],      // optional: more exporters read live
   "snapshot": "/path/data.md",            // optional: `### key` sections written by another job
-  "sizes": "/path/sizes.txt",             // optional: TARGET LOCAL REMOTE BILLED table
-  "price_per_tb": 7.50, "price_label": "cold $/mo",
+  "sizes": "/path/sizes.txt",             // optional: TARGET LOCAL <STORE>... table, one column per store
+  "size_labels": {"NAS": "NAS"},          // optional: plain names for the store columns
+  "size_prices": {"VAULT": 7.50, "COLD": 0}, // optional: $/TB-month per store; others show no cost
+  "price_per_tb": 7.50, "price_label": "cold $/mo", // price_per_tb prices COLD only when size_prices is absent
   "groups": [{"id": "system", "title": "System"}],
   "pages": [
     {"id": "load", "group": "system", "kind": "line", "title": "Load",
