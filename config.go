@@ -25,8 +25,8 @@ type Config struct {
 	Title        string     `json:"title"`
 	VM           string     `json:"vm"`
 	Snapshot     string     `json:"snapshot"`      // markdown file of `### key` sections (root-only figures)
-	Sizes        string     `json:"sizes"`         // a sizes table, TARGET LOCAL then one column per store
-	PricePerTB   float64    `json:"price_per_tb"`  // $/TB-month for COLD when size_prices is empty
+	Sizes        string     `json:"sizes"`         // a sizes table: TARGET LOCAL <stores…>, one row per backup target
+	PricePerTB   float64    `json:"price_per_tb"`  // $/TB-month for every remote store when size_prices is empty
 	PriceLabel   string     `json:"price_label"`   // e.g. "cold $/mo"
 	Thermal      [2]float64 `json:"thermal_range"` // °C mapped to the cool→hot ramp
 	DefaultRange string     `json:"default_range"`
@@ -45,7 +45,7 @@ type Config struct {
 	SizeLabels map[string]string `json:"size_labels"`
 	// SizePrices is $/TB-month per sizes-file column, e.g. {"VAULT": 7.5, "COLD": 0}. A
 	// column named here shows a monthly cost, $0 included; others show none. Empty means
-	// {"COLD": price_per_tb}, the single priced store before per-store prices existed.
+	// price_per_tb for every store but LOCAL.
 	SizePrices map[string]float64 `json:"size_prices"`
 	// Packs names the built-in chart packs to include (packs.go). Absent with no pages of
 	// its own, a config gets every pack; pages the database cannot fill are dropped.
@@ -984,7 +984,13 @@ func sizesBlocks(c *Config) ([]block, string, string, error) {
 		prices[strings.ToUpper(k)] = v
 	}
 	if len(c.SizePrices) == 0 && c.PricePerTB > 0 {
-		prices["COLD"] = c.PricePerTB // the one priced store before size_prices existed
+		// One price for every remote store when none is named. hdr is TARGET LOCAL <stores…>:
+		// LOCAL is this box's own disk, which costs nothing per month.
+		for _, k := range hdr[1:] {
+			if k != "LOCAL" {
+				prices[k] = c.PricePerTB
+			}
+		}
 	}
 	var out []block
 	for col := 0; col < ncol; col++ {

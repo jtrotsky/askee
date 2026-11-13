@@ -1,1 +1,4 @@
 /askee
+
+# machine-specific dev launch config (paths, private URLs)
+.claude/launch.json
