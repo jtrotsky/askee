@@ -26,7 +26,7 @@ func TestSizeFieldsJoinsSpacedUnits(t *testing.T) {
 	}
 }
 
-// The old four-column file still reads, priced on COLD by default.
+// The old four-column file still reads. price_per_tb alone prices every remote store, not LOCAL.
 func TestSizesBlocksFourColumns(t *testing.T) {
 	c := writeSizes(t, `BACKUP SIZES
   TARGET   LOCAL   NAS   COLD
@@ -42,8 +42,8 @@ func TestSizesBlocksFourColumns(t *testing.T) {
 	if len(bl) != 3 {
 		t.Fatalf("want 3 blocks, got %d", len(bl))
 	}
-	if !strings.Contains(bl[2].Text, "$0.02/mo") || strings.Contains(bl[1].Text, "$") {
-		t.Fatalf("pricing: nas %q cold %q", bl[1].Text, bl[2].Text)
+	if strings.Contains(bl[0].Text, "$") || !strings.Contains(bl[1].Text, "$0.02/mo") || !strings.Contains(bl[2].Text, "$0.02/mo") {
+		t.Fatalf("pricing: local %q nas %q cold %q", bl[0].Text, bl[1].Text, bl[2].Text)
 	}
 }
 
@@ -70,7 +70,7 @@ func TestSizesBlocksSixColumnsSpaced(t *testing.T) {
 		t.Fatalf("vault text %q", bl[3].Text)
 	}
 	if !strings.HasSuffix(bl[2].Text, "$0.00/mo") {
-		t.Fatalf("COLD at $0/TB should say so: %q", bl[2].Text)
+		t.Fatalf("cold at $0/TB should say so: %q", bl[2].Text)
 	}
 	if strings.Contains(bl[1].Text, "$") {
 		t.Fatalf("NAS has no price and should show none: %q", bl[1].Text)
