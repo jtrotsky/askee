@@ -59,38 +59,17 @@ To choose packs or add charts of your own, write a config file. This one was sav
 
 askee finds it without a flag. It looks for `$ASKEE_CONFIG`, then `./askee.json`, then
 `~/.config/askee/askee.json`, then `/usr/local/etc/askee/askee.json`. Here is part of the
-output, again from synthetic data (two of the four charts in the group):
+output, again from synthetic data (two of the four charts in the group), drawn as an image
+because GitHub's code font has no braille:
+
+![askee -print output: boxed CPU busy and CPU temperature panels drawn in braille, each followed by its numbers](images/print-system.png)
+
+The number lines under each panel are plain text, so scripts can read them:
 
 ```
-$ askee -print system -range 24h -size 72x9
-demo · System · range 24h · 2026-11-14 09:58
-
-┌─ CPU busy [24h] ──────────────── ■ ━━ kernel 8.69%  ■ ╍╍ apps 26.1% ─┐
-│                                            ┊reboot                   │
-│  78.7┤                                     ┊    ⣆⣰                   │
-│      │                                     ┊     ⢸                   │
-│      │⡄  ⢀⢀ ⣦⢤ ⢦⣤ ⣄⣄ ⣀⡀ ⣀⣀                 ┊     ⢸             ⣀  ⣀⣀ │
-│      │⠈⠋ ⠋⠉        ⠈  ⠛ ⠉  ⠋⠉ ⠢⣤ ⣤⣀ ⠦⠴ ⣤⠶ ⡴⠶ ⣤⢄⡗⠛⢹ ⢆⣠ ⡤⢤ ⠦⢤ ⠦⢴ ⠋⠙ ⠁  │
-│  4.54┤⠢⠦⠒⠒⠶⠖⠒⠶⠲⠒⠖⠲⠦⠶⠒⠒⠶⠲⠦⠖⠤⠴⠒⠒⠒⠼⠶⠶⠶⠒⠲⠦⠖⠒⠶⠖⠶⠖⠒⠒⠖⠃ ⠘⠒⠒⠶⠒⠒⠲⠦⠒⠒⠲⠒⠒⠒⠒⠖⠖⠒⠒ │
-│       09:58                       21:58                        09:58 │
-└────────────────────────── kernel: min 4.54 · max 30.4 · mean 8.26 % ─┘
   kernel             latest 8.69     min 4.54     max 30.4     mean 8.26     % (n=289)
   apps               latest 26.1     min 7.75     max 44.2     mean 20.3     % (n=289)
-  waiting            latest 0.44     min 0.41     max 7.15     mean 1.04     % (n=289)
-  so what: Kernel is the operating system's own work, and waiting is time stalled on disk or a busy host (Linux only).
-
-┌─ CPU temperature [24h] ──────────────────────── ■ ━━ hottest 54.6°C ─┐
-│       ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄ ┄┊reboot┄ ┄ ┄ limit 100°C  │
-│                                            ┊                         │
-│                                            ┊                         │
-│  69.9┤                                     ┊   ⡖⠖⢲                   │
-│      │⣄⣀⣠⣠⣠⣤⢦⠦⠤⠤⢤⠤⣤⢤⣤⣤⣄⣀⣤⢄⣀⣀⣀⣀⡀      ⢀     ⢀   ⡇ ⢸⡀⡀     ⡀  ⡀ ⣀⣤⣀⣀⣠⡤ │
-│  46.9┤                ⠁   ⠉⠁  ⠉⠙⠙⠙⠓⠊⠉⠉⠉⠋⠉⠋⠉⠉⠋⠉⠛⠁ ⠘⠉⠑⠛⠑⠙⠙⠉⠉⠛⠉⠈⠉⠁      │
-│       09:58                       21:58                        09:58 │
-└──────────────────────── hottest: min 46.9 · max 69.9 · mean 52.4 °C ─┘
   hottest            latest 54.6     min 46.9     max 69.9     mean 52.4     °C (n=289)
-  reference: limit = 100 °C
-  so what: The dashed line, where the sensor reports one, is its critical limit.
 ```
 
 ### Flags
