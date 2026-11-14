@@ -7,11 +7,12 @@ built from the standard library alone.
 
 askee does not collect anything. You bring the data.
 
-![CPU temperature over 24 hours, drawn by askee in the terminal](images/terminal-temperature-ember-chalk.png)
+![CPU temperature over 24 hours, drawn by askee in the terminal in the carbon theme: a braille line in light grey on charcoal, a dashed limit line at 105°C and a dotted reboot mark](images/terminal-carbon.png)
 
-*One page of the terminal view, drawn with `askee -dump 2`. The line is
-coloured by temperature, the dashed line is the sensor's limit, and the dotted
-mark is a reboot. The data is synthetic, served by a stand-in Prometheus API.*
+*One page of the terminal view in `carbon`, drawn with `askee -dump 2`. The
+dashed line is the sensor's limit and the dotted mark is a reboot. The data is
+synthetic, served by a stand-in Prometheus API. Screenshots here use the two
+default themes, `carbon` on dark and `newsprint` on light.*
 
 ## How it works
 
@@ -133,7 +134,11 @@ and bars in eighth-blocks. ←/→ or `h`/`l` move between charts, ↑/↓ or `k
 range, `1` to `7` pick a range, `t` changes the theme and `q` quits. It uses truecolour when
 `$COLORTERM` says the terminal has it, and the nearest xterm-256 colour otherwise.
 
-![The web view: CPU busy, CPU temperature, load and CPU busy by hour, in the ember theme](images/web-ember.png)
+![The same CPU temperature page in the terminal, in the newsprint theme: a dark braille line on light grey](images/terminal-newsprint.png)
+
+![The web view in newsprint: CPU busy stacked by kind in textured greys, CPU temperature with its limit, load against the core count, and CPU busy by hour as bars](images/web-newsprint.png)
+
+![The same web view in carbon, light grey on charcoal](images/web-carbon.png)
 
 **Web.** A grid of charts sized to the window, one group per screen. The page is built into
 the binary. The browser can ask only for a group and one of the fixed ranges. Every query
@@ -216,6 +221,29 @@ greyscale and for readers who do not see colour the usual way: `newsprint`, `sep
 against their own background. `chalkboard` sits just under it, so its lines are also dashed.
 `terminal`, the plain xterm colours, fails (yellow against green). `askee -themes` prints each
 palette and its result.
+
+### The other themes
+
+The same System page in each of the seven themes beyond the two defaults.
+
+**ember-chalk**, warm grey with ember and teal
+
+![The web view in ember-chalk](images/web-ember-chalk.png)
+
+<table>
+<tr>
+<td width="50%"><b>fjord</b>, slate and muted blue<br><img src="images/web-fjord.png" alt="The web view in fjord"></td>
+<td width="50%"><b>chalkboard</b>, chalk on slate green<br><img src="images/web-chalkboard.png" alt="The web view in chalkboard"></td>
+</tr>
+<tr>
+<td><b>sepia</b>, brown ink on old paper<br><img src="images/web-sepia.png" alt="The web view in sepia"></td>
+<td><b>phosphor</b>, a green CRT<br><img src="images/web-phosphor.png" alt="The web view in phosphor"></td>
+</tr>
+<tr>
+<td><b>amber</b>, an amber CRT<br><img src="images/web-amber.png" alt="The web view in amber"></td>
+<td><b>terminal</b>, the plain xterm colours<br><img src="images/web-terminal.png" alt="The web view in terminal"></td>
+</tr>
+</table>
 
 ## Live range
 
