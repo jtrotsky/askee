@@ -1,18 +1,20 @@
 # askee
 
-askee is a dashboard for metrics you already collect. It reads a
-Prometheus-compatible database (Prometheus or VictoriaMetrics) and draws its
-charts in a terminal, in a browser, or as plain text. It is one Go binary,
-built from the standard library alone.
+askee is a dashboard for Prometheus metrics. It queries a Prometheus-compatible
+database (Prometheus or VictoriaMetrics) and draws charts in a terminal, in a web
+browser or as plain text. It is a single Go binary with no dependencies outside the
+standard library.
 
-askee does not collect anything. You bring the data.
+askee only reads. It needs a database that already holds your metrics, and it stores
+nothing of its own.
 
 ![CPU temperature over 24 hours, drawn by askee in the terminal in the carbon theme: a braille line in light grey on charcoal, a dashed limit line at 105°C and a dotted reboot mark](images/terminal-carbon.png)
 
-*One page of the terminal view in `carbon`, drawn with `askee -dump 2`. The
-dashed line is the sensor's limit and the dotted mark is a reboot. The data is
-synthetic, served by a stand-in Prometheus API. Screenshots here use the two
-default themes, `carbon` on dark and `newsprint` on light.*
+*The CPU temperature page in the terminal, in the `carbon` theme, drawn with
+`askee -dump 2`. The dashed line is the sensor's limit and the dotted line marks a
+reboot. The data is synthetic, served by a fake Prometheus API. The screenshots in
+this README use the two default themes: `carbon` for dark screens and `newsprint` for
+light ones.*
 
 ## How it works
 
@@ -23,47 +25,43 @@ default themes, `carbon` on dark and `newsprint` on light.*
                                                                your config)     plain text
 ```
 
-1. **Something exports metrics.** [node_exporter](https://github.com/prometheus/node_exporter)
-   on each machine is the usual start. Any exporter works.
-2. **Your database scrapes and stores them.** askee needs its query URL. It
-   keeps no database of its own and writes nothing to disk.
-3. **A config file says what to draw.** Each chart is a page with a PromQL
-   query. Built-in packs cover node_exporter, so with no config at all askee
-   shows every pack: CPU, memory, storage, network and the blocky DNS proxy.
-4. **askee asks the database when someone looks.** The terminal, the web page
-   and the text output all run the same queries from the same config, so a
-   chart reads the same in each.
+1. An exporter publishes metrics from each machine.
+   [node_exporter](https://github.com/prometheus/node_exporter) is the usual one, but
+   any exporter works.
+2. Prometheus or VictoriaMetrics scrapes and stores them. askee needs the database's
+   query URL. It keeps no data and writes nothing to disk.
+3. A config file lists the charts. Each chart is a page with one or more PromQL
+   queries. Built-in packs cover node_exporter, so without a config file askee shows
+   every pack: CPU, memory, storage, network and the blocky DNS proxy.
+4. askee queries the database while someone is looking at a chart. The terminal, the
+   web page and the text output run the same queries from the same config, so a chart
+   shows the same data in each.
 
-A built-in page that needs something a machine lacks, such as ZFS or a
-temperature sensor, is left out when its query returns nothing.
+A built-in page that needs something the machine lacks, such as ZFS or a temperature
+sensor, is hidden when its query returns nothing.
 
-## The design language
+## Design
 
-askee draws like a print chart: one ink on a plain ground, monospace type,
-and every number written down. The default themes are greyscale, `carbon` on
-a dark screen and `newsprint` on a light one. These rules can be lifted into
-any dashboard.
+askee's charts look like printed charts: one ink on a plain background, monospace
+type, and the numbers printed beside each chart. The default themes are greyscale.
+Any dashboard could follow the same rules.
 
-- **Line style before colour.** In the one-ink themes, lines are told apart by
-  dash pattern (solid, dashed, dotted, dash-dot, long dash), so a chart reads
-  in greyscale and for readers who do not see colour the usual way. The colour
-  themes are checked for colour blindness against their own background, and
-  `askee -themes` prints the result.
-- **Names on the lines.** Each line carries its name and latest value at its
-  right end. There is no legend.
-- **The axis fits the data.** The y axis runs from the data's own minimum to
-  its maximum.
-- **Limits as dashed lines.** A reference value, such as a core count or a
-  sensor's limit, is a named dashed line. An event, such as a reboot, is a
-  dotted mark.
-- **Numbers, not just shapes.** The text view prints `latest / min / max /
-  mean` under every chart, so nobody has to judge a value from the height of
-  a dot.
-- **Text in the terminal.** Lines are braille (2 × 4 dots per character) and
-  bars are eighth-blocks, so a chart is drawn in characters and works over SSH.
-- **Short words, enforced.** askee refuses a page whose title holds a comma or
-  a dash, whose `info` runs past one sentence, or whose `note` passes 50
-  characters. It names the page and the rule.
+- In the one-ink themes, lines differ by dash pattern (solid, dashed, dotted,
+  dash-dot, long dash), so charts read in greyscale and for colour-blind readers. The
+  colour themes are tested for colour blindness against their own background.
+  `askee -themes` prints the results.
+- Each line is labelled at its right-hand end with its name and latest value. There
+  is no legend.
+- The y axis runs from the lowest value in the data to the highest.
+- A reference value, such as the core count or a sensor's limit, is a labelled dashed
+  line. An event, such as a reboot, is a dotted line.
+- The text view prints the latest, minimum, maximum and mean of every series, so
+  readers do not have to estimate values from the line.
+- In the terminal, lines are drawn in braille characters (2 × 4 dots each) and bars in
+  eighth-blocks, so charts work over SSH.
+- askee refuses a page whose title contains a comma or a dash, whose `info` is longer
+  than one sentence, or whose `note` is longer than 50 characters. The error names
+  the page and the rule.
 
 ## Install
 
@@ -73,8 +71,8 @@ cd askee
 go build -o askee .
 ```
 
-It needs Go 1.27 or later and nothing else. It builds for FreeBSD, Linux and
-macOS, not Windows (the terminal view uses `stty`).
+It needs Go 1.27 or later. It builds for FreeBSD, Linux and macOS. It does not
+build for Windows, because the terminal view uses `stty`.
 
 ## Use
 
@@ -203,7 +201,7 @@ more PromQL expressions:
 | `snapshot` | a section of a Markdown file written by another job |
 | `sizes` | a table of sizes per target and store, as rows of cells |
 
-A page that breaks the writing rules (see The design language) is refused. On a live reload
+A page that breaks the writing rules (see Design) is refused. On a live reload
 the last good config keeps serving.
 
 Each key is listed, with a comment, in the `PageCfg` type in [`config.go`](config.go). The pack
@@ -224,7 +222,7 @@ palette and its result.
 
 ### The other themes
 
-The same System page in each of the seven themes beyond the two defaults.
+The System page in the other seven themes.
 
 **ember-chalk**, warm grey with ember and teal
 
