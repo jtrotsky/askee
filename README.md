@@ -1,27 +1,68 @@
 # askee
 
-askee draws charts from a Prometheus-compatible database (Prometheus, VictoriaMetrics) in a
-terminal, in a browser, or as plain text. It is one Go binary built from the standard library
-alone.
+askee is a dashboard for metrics you already collect. It reads a
+Prometheus-compatible database (Prometheus or VictoriaMetrics) and draws its
+charts in a terminal, in a browser, or as plain text. It is one Go binary,
+built from the standard library alone.
+
+askee does not collect anything. You bring the data.
 
 ![CPU temperature over 24 hours, drawn by askee in the terminal](images/terminal-temperature-ember-chalk.png)
 
-*One page of the terminal view, drawn once with `askee -dump 2` in the `ember-chalk` theme.
-The line is coloured by temperature. The dashed line is the sensor's limit, and the dotted
-mark is a reboot. The data is synthetic: a stand-in Prometheus API serving made-up values.*
+*One page of the terminal view, drawn with `askee -dump 2`. The line is
+coloured by temperature, the dashed line is the sensor's limit, and the dotted
+mark is a reboot. The data is synthetic, served by a stand-in Prometheus API.*
 
-## Why
+## How it works
 
-One chart definition draws in three places: a terminal over SSH, a browser on a phone, and
-the text a script reads. All three ask the same page for the same data, so a chart reads the
-same in each. askee needs no browser and no database of its own. It queries the
-database you already run and writes nothing to disk, so it works from a recovery shell.
+```
+ your machines                your database                 askee
+ node_exporter, etc.  ──▶  Prometheus / VictoriaMetrics  ◀──  queries it  ──▶  terminal
+ (expose /metrics)          (scrapes and stores)              (PromQL from      browser
+                                                               your config)     plain text
+```
 
-Each chart prints its numbers as well as its line. A line carries its name and latest value at
-its right end, so there is no legend to decode. The y axis runs from the data's own minimum to
-its maximum. Reference values, such as the core count or a sensor's limit, are drawn as dashed
-lines on the chart. The plain-text output adds a `latest / min / max / mean` line per series,
-so a script never has to judge a value from the height of a dot.
+1. **Something exports metrics.** [node_exporter](https://github.com/prometheus/node_exporter)
+   on each machine is the usual start. Any exporter works.
+2. **Your database scrapes and stores them.** askee needs its query URL. It
+   keeps no database of its own and writes nothing to disk.
+3. **A config file says what to draw.** Each chart is a page with a PromQL
+   query. Built-in packs cover node_exporter, so with no config at all askee
+   shows every pack: CPU, memory, storage, network and the blocky DNS proxy.
+4. **askee asks the database when someone looks.** The terminal, the web page
+   and the text output all run the same queries from the same config, so a
+   chart reads the same in each.
+
+A built-in page that needs something a machine lacks, such as ZFS or a
+temperature sensor, is left out when its query returns nothing.
+
+## The design language
+
+askee draws like a print chart: one ink on a plain ground, monospace type,
+and every number written down. The default themes are greyscale, `carbon` on
+a dark screen and `newsprint` on a light one. These rules can be lifted into
+any dashboard.
+
+- **Line style before colour.** In the one-ink themes, lines are told apart by
+  dash pattern (solid, dashed, dotted, dash-dot, long dash), so a chart reads
+  in greyscale and for readers who do not see colour the usual way. The colour
+  themes are checked for colour blindness against their own background, and
+  `askee -themes` prints the result.
+- **Names on the lines.** Each line carries its name and latest value at its
+  right end. There is no legend.
+- **The axis fits the data.** The y axis runs from the data's own minimum to
+  its maximum.
+- **Limits as dashed lines.** A reference value, such as a core count or a
+  sensor's limit, is a named dashed line. An event, such as a reboot, is a
+  dotted mark.
+- **Numbers, not just shapes.** The text view prints `latest / min / max /
+  mean` under every chart, so nobody has to judge a value from the height of
+  a dot.
+- **Text in the terminal.** Lines are braille (2 × 4 dots per character) and
+  bars are eighth-blocks, so a chart is drawn in characters and works over SSH.
+- **Short words, enforced.** askee refuses a page whose title holds a comma or
+  a dash, whose `info` runs past one sentence, or whose `note` passes 50
+  characters. It names the page and the rule.
 
 ## Install
 
@@ -31,22 +72,20 @@ cd askee
 go build -o askee .
 ```
 
-It needs Go 1.27 or later and has no other dependencies. It builds for FreeBSD, Linux and
-macOS. It does not build for Windows. The terminal view uses `stty`.
+It needs Go 1.27 or later and nothing else. It builds for FreeBSD, Linux and
+macOS, not Windows (the terminal view uses `stty`).
 
 ## Use
 
-Point askee at a database that holds [node_exporter](https://github.com/prometheus/node_exporter)
-metrics. With no config file it shows every built-in pack:
+Point askee at your database:
 
 ```sh
-askee -vm http://127.0.0.1:9090 -print system     # plain text, then exit
-askee -vm http://127.0.0.1:9090                   # terminal view
+askee -vm http://127.0.0.1:9090 -print system           # plain text, then exit
+askee -vm http://127.0.0.1:9090                         # terminal view
 askee -vm http://127.0.0.1:9090 -serve 127.0.0.1:8095   # web dashboard
 ```
 
-To choose packs or add charts of your own, write a config file. This one was saved as
-`askee.json`:
+To choose packs or add your own charts, write a config file, `askee.json`:
 
 ```json
 {
@@ -57,14 +96,14 @@ To choose packs or add charts of your own, write a config file. This one was sav
 }
 ```
 
-askee finds it without a flag. It looks for `$ASKEE_CONFIG`, then `./askee.json`, then
-`~/.config/askee/askee.json`, then `/usr/local/etc/askee/askee.json`. Here is part of the
-output, again from synthetic data (two of the four charts in the group), drawn as an image
-because GitHub's code font has no braille:
+askee looks for `$ASKEE_CONFIG`, then `./askee.json`, then
+`~/.config/askee/askee.json`, then `/usr/local/etc/askee/askee.json`. Here is
+part of `-print system` from synthetic data, shown as an image because
+GitHub's code font has no braille:
 
 ![askee -print output: boxed CPU busy and CPU temperature panels drawn in braille, each followed by its numbers](images/print-system.png)
 
-The number lines under each panel are plain text, so scripts can read them:
+The number lines are plain text, so scripts can read them:
 
 ```
   kernel             latest 8.69     min 4.54     max 30.4     mean 8.26     % (n=289)
@@ -159,9 +198,8 @@ more PromQL expressions:
 | `snapshot` | a section of a Markdown file written by another job |
 | `sizes` | a table of sizes per target and store, as rows of cells |
 
-askee refuses to load a page that breaks its writing rules: a title with a comma or dash, an
-`info` longer than one sentence, or a `note` longer than 50 characters. It names the page and
-the rule. On a live reload the last good config keeps serving.
+A page that breaks the writing rules (see The design language) is refused. On a live reload
+the last good config keeps serving.
 
 Each key is listed, with a comment, in the `PageCfg` type in [`config.go`](config.go). The pack
 files under [`packs/`](packs) are working examples of `line`, `instant` and `hour` pages.
