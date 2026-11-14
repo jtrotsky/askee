@@ -105,9 +105,9 @@ GitHub's code font has no braille:
 The number lines are plain text, so scripts can read them:
 
 ```
-  kernel             latest 8.69     min 4.54     max 30.4     mean 8.26     % (n=289)
-  apps               latest 26.1     min 7.75     max 44.2     mean 20.3     % (n=289)
-  hottest            latest 54.6     min 46.9     max 69.9     mean 52.4     °C (n=289)
+  kernel             latest 12.2     min 4.81     max 24.4     mean 9.62     % (n=289)
+  apps               latest 21.7     min 6.60     max 25.3     mean 15.9     % (n=289)
+  hottest            latest 67.0     min 50.3     max 79.9     mean 58.5     °C (n=289)
 ```
 
 ### Flags
